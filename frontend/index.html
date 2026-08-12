@@ -106,7 +106,14 @@
     fill: var(--text);
     font-size: 11px;
     pointer-events: none;
-    text-anchor: middle;
+    /* No text-anchor here on purpose: CSS beats SVG presentation attributes,
+       so setting it would override the per-node radial anchoring in render().
+       The dark stroke is painted under the glyphs as a halo so labels stay
+       readable where they cross edge lines. */
+    stroke: var(--bg);
+    stroke-width: 3px;
+    paint-order: stroke;
+    stroke-linejoin: round;
   }
   .edge { stroke: #3a4a5c; stroke-width: 1.4px; fill: none; marker-end: url(#arrow); }
   .ring { fill: none; stroke: var(--border); stroke-dasharray: 3 4; }
@@ -293,7 +300,20 @@ function render(data) {
   const cx = rect.width / 2;
   const cy = rect.height / 2;
   const maxHop = Math.max(...data.nodes.map((n) => n.hop));
-  const ringGap = Math.min(90, (Math.min(rect.width, rect.height) / 2 - 60) / Math.max(maxHop, 1));
+  const hops = Math.max(maxHop, 1);
+
+  // Rings are elliptical, sized independently on each axis. Sizing both from
+  // Math.min(width, height) squandered the panel's spare width (~370px on a
+  // typical desktop) and squeezed the rings together; separate rx/ry lets the
+  // layout use the space it actually has. The caps stop a shallow graph from
+  // flinging two nodes into opposite corners.
+  // Clamped at both ends. The upper cap stops a shallow graph from flinging
+  // two nodes into opposite corners; the lower floor matters because the
+  // margin subtraction goes *negative* on a narrow panel, which previously
+  // inverted the radii and collapsed the whole graph into one unreadable
+  // knot in the corner.
+  const ringX = Math.max(34, Math.min(170, (rect.width / 2 - 110) / hops));
+  const ringY = Math.max(28, Math.min(130, (rect.height / 2 - 44) / hops));
 
   // group nodes by hop, place evenly around each ring
   const byHop = new Map();
@@ -304,13 +324,19 @@ function render(data) {
 
   const pos = new Map();
   for (const [hop, nodesAtHop] of byHop) {
-    const r = hop * ringGap;
-    if (hop > 0) ringsG.appendChild(el("circle", { class: "ring", cx, cy, r }));
+    const rx = hop * ringX;
+    const ry = hop * ringY;
+    if (hop > 0) ringsG.appendChild(el("ellipse", { class: "ring", cx, cy, rx, ry }));
+    // Each ring is rotated slightly relative to the last so nodes on adjacent
+    // rings don't stack up along the same spoke.
+    const startAngle = -Math.PI / 2 + hop * 0.4;
     nodesAtHop.forEach((n, i) => {
-      const angle = (2 * Math.PI * i) / nodesAtHop.length - Math.PI / 2;
-      const x = cx + r * Math.cos(angle);
-      const y = cy + r * Math.sin(angle);
-      pos.set(n.name, { x, y });
+      const angle = (2 * Math.PI * i) / nodesAtHop.length + startAngle;
+      pos.set(n.name, {
+        x: cx + rx * Math.cos(angle),
+        y: cy + ry * Math.sin(angle),
+        angle,
+      });
     });
   }
 
@@ -326,7 +352,26 @@ function render(data) {
     const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
     const radius = n.hop === 0 ? 10 : 6;
     g.appendChild(el("circle", { r: radius, fill: hopColor(n.hop) }));
-    const label = el("text", { y: -(radius + 5) });
+
+    // Labels sit outward along each node's own radius rather than all being
+    // centred above their node. On a ring, centred labels collide as soon as
+    // two neighbours are close in angle (this is what merged "get-intrinsic"
+    // and "side-channel-map" into one unreadable run); radiating them apart
+    // follows the layout's own geometry and keeps them legible.
+    let label;
+    if (n.hop === 0) {
+      label = el("text", { y: -(radius + 7), "text-anchor": "middle" });
+    } else {
+      const dirX = Math.cos(p.angle);
+      const dirY = Math.sin(p.angle);
+      const gap = radius + 7;
+      label = el("text", {
+        x: dirX * gap,
+        y: dirY * gap,
+        "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+        "dominant-baseline": dirY > 0.4 ? "hanging" : dirY < -0.4 ? "auto" : "middle",
+      });
+    }
     label.textContent = n.name;
     g.appendChild(label);
     const title = el("title", {});
