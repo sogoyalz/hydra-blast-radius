@@ -202,6 +202,12 @@
     <h2>Result</h2>
     <div id="summary">Enter a package above and compute its blast radius.</div>
 
+    <h2>Shared publish rights</h2>
+    <div id="maintainer-result" style="font-size:13px;line-height:1.6">
+      <span style="color:var(--muted)">Compute a blast radius to see which packages share
+      a maintainer with it.</span>
+    </div>
+
     <h2>Hop legend</h2>
     <div class="legend">
       <div class="legend-row"><span class="swatch" style="background:var(--accent)"></span> target (compromised package)</div>
@@ -381,6 +387,42 @@ function render(data) {
   }
 }
 
+// The dependency graph is only one of the two ways a compromise spreads.
+// Shared publish rights are the other, and for some packages they dominate:
+// this panel exists to make that gap impossible to miss.
+function renderMaintainers(data) {
+  const box = document.getElementById("maintainer-result");
+  const m = data.maintainers;
+  if (!m || m.groups.length === 0) {
+    box.innerHTML = `<span style="color:var(--muted)">No other ingested package shares a
+      maintainer with <strong>${data.target}</strong>.</span>`;
+    return;
+  }
+
+  const missed = m.missedByDeps.length;
+  const headline = missed
+    ? `<div style="margin-bottom:10px">
+         <span class="big" style="color:var(--danger)">+${missed}</span><br/>
+         further package${missed === 1 ? "" : "s"} an attacker could push to with the same
+         credentials &mdash; <strong>invisible to the dependency graph</strong>.
+       </div>`
+    : `<div style="margin-bottom:10px;color:var(--muted)">Shared publish rights reach
+         ${m.reach.length} package(s), all already covered by the dependency blast radius.</div>`;
+
+  const groups = m.groups
+    .map(
+      (g) => `<div class="suspect">
+        <strong>${g.maintainer}</strong> can also publish to ${g.packages.length}:<br/>
+        <span style="color:var(--muted)">${g.packages.slice(0, 12).join(", ")}${
+        g.packages.length > 12 ? `, +${g.packages.length - 12} more` : ""
+      }</span>
+      </div>`
+    )
+    .join("");
+
+  box.innerHTML = headline + groups;
+}
+
 async function computeBlastRadius() {
   const name = pkgInput.value.trim();
   const depth = Number(depthInput.value) || 6;
@@ -405,6 +447,8 @@ async function computeBlastRadius() {
       <span style="color:var(--muted)">${data.totalMs}ms total for
       ${data.queryCount} queries, including the hop-distance and edge lookups
       used only to draw the graph.</span>`;
+
+    renderMaintainers(data);
     statusEl.textContent = "";
   } catch (err) {
     statusEl.textContent = err.message;

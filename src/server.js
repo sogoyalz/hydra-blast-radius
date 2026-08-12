@@ -10,6 +10,7 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { blastRadiusWithHops } from "./blastRadius.js";
 import { findTyposquats } from "./typosquat.js";
+import { sharedMaintainerReach } from "./sharedMaintainers.js";
 import { runQuery, packageId } from "./hydra.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -76,9 +77,28 @@ async function handleApi(req, res, url) {
 
     const start = Date.now();
     const result = await blastRadiusWithHops(name, depth);
+
+    // The second attack path: packages reachable through shared publish
+    // rights rather than through a dependency edge. Reported alongside the
+    // dependency blast radius because the two answers can differ wildly —
+    // and the gap is the whole point.
+    const { groups, reach } = await sharedMaintainerReach(name);
+    const exposedByDeps = new Set(result.nodes.map((n) => n.name));
+    const missedByDeps = reach.filter((p) => !exposedByDeps.has(p));
+
     // coreQueryMs (the traversal that answers the question) is reported
     // separately from totalMs (which also covers laying out the picture).
-    return sendJson(res, 200, { ...result, totalMs: Date.now() - start });
+    return sendJson(res, 200, {
+      ...result,
+      maintainers: { groups, reach, missedByDeps },
+      totalMs: Date.now() - start,
+    });
+  }
+
+  if (url.pathname === "/api/shared-maintainers") {
+    const name = url.searchParams.get("name");
+    if (!name) return sendJson(res, 400, { error: "missing ?name=" });
+    return sendJson(res, 200, await sharedMaintainerReach(name));
   }
 
   if (url.pathname === "/api/typosquat") {

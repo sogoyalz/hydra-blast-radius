@@ -5,7 +5,7 @@
 // Usage: node src/ingest.js <package-name> [--depth=4] [--max-nodes=300]
 
 import { pathToFileURL } from "node:url";
-import { runQuery, cypherString, packageId } from "./hydra.js";
+import { runQuery, cypherString, packageId, maintainerId } from "./hydra.js";
 
 const REGISTRY = "https://registry.npmjs.org";
 const CRAWL_CONCURRENCY = 8;
@@ -32,13 +32,20 @@ function registryUrl(name) {
   return `${REGISTRY}/${name.replace("/", "%2f")}/latest`;
 }
 
-async function fetchDependencies(name) {
+async function fetchManifest(name) {
   const res = await fetch(registryUrl(name));
   if (!res.ok) return null; // unpublished, deprecated-and-removed, private, etc. — skip
   const manifest = await res.json();
   return {
-    ...(manifest.dependencies ?? {}),
-    ...(manifest.peerDependencies ?? {}),
+    dependencies: {
+      ...(manifest.dependencies ?? {}),
+      ...(manifest.peerDependencies ?? {}),
+    },
+    // Publish rights are an attack path in their own right: the TanStack
+    // worm spread through compromised publishing access, not through a
+    // vulnerable dependency edge. Capturing maintainers lets the graph
+    // answer "who else could this actor push to".
+    maintainers: (manifest.maintainers ?? []).map((m) => m?.name).filter(Boolean),
   };
 }
 
@@ -69,6 +76,7 @@ async function mapWithConcurrency(items, limit, fn) {
 export async function crawl(root, maxDepth, maxNodes) {
   const visited = new Set([root]);
   const edges = []; // {from, to} — both endpoints always in `visited`
+  const maintainedBy = []; // {pkg, maintainer}
   let frontier = [{ name: root, depth: 0 }];
   let truncated = false;
 
@@ -77,18 +85,22 @@ export async function crawl(root, maxDepth, maxNodes) {
     if (toFetch.length === 0) break;
 
     const results = await mapWithConcurrency(toFetch, CRAWL_CONCURRENCY, async (node) => {
-      let deps;
+      let manifest;
       try {
-        deps = await fetchDependencies(node.name);
+        manifest = await fetchManifest(node.name);
       } catch {
-        deps = null;
+        manifest = null;
       }
-      return { node, deps };
+      return { node, manifest };
     });
 
     const nextFrontier = [];
-    for (const { node, deps } of results) {
-      if (!deps) continue;
+    for (const { node, manifest } of results) {
+      if (!manifest) continue;
+      const deps = manifest.dependencies;
+      for (const maintainer of manifest.maintainers) {
+        maintainedBy.push({ pkg: node.name, maintainer });
+      }
       for (const depName of Object.keys(deps)) {
         if (!visited.has(depName)) {
           if (visited.size >= maxNodes) {
@@ -106,7 +118,14 @@ export async function crawl(root, maxDepth, maxNodes) {
   }
   process.stderr.write("\n");
 
-  return { nodes: visited, edges, truncated };
+  // Only keep publish-rights facts for packages that made the node cap, so
+  // the maintainer graph stays consistent with the dependency graph.
+  return {
+    nodes: visited,
+    edges,
+    maintainedBy: maintainedBy.filter((m) => visited.has(m.pkg)),
+    truncated,
+  };
 }
 
 // HydraDB's current MERGE implementation only upserts vertices by an integer
@@ -152,13 +171,45 @@ export async function writeEdges(edges) {
   process.stderr.write("\n");
 }
 
+// Publish-rights edges, mirrored for the same reason dependency edges are:
+// "which packages share a maintainer with X" has to start from a fixed X and
+// walk outward, so both directions are materialised at write time.
+export async function writeMaintainers(links) {
+  let written = 0;
+  let failed = 0;
+  await mapWithConcurrency(links, WRITE_CONCURRENCY, async (link) => {
+    const pkgId = packageId(link.pkg);
+    const mId = maintainerId(link.maintainer); // separate id namespace — see hydra.js
+    const pkgName = cypherString(link.pkg);
+    const mName = cypherString(link.maintainer);
+    try {
+      await runQuery(
+        `MERGE (p:Package {id: ${pkgId}, name: ${pkgName}})-[:MAINTAINED_BY]->(m:Maintainer {id: ${mId}, name: ${mName}})`
+      );
+      await runQuery(
+        `MERGE (m:Maintainer {id: ${mId}, name: ${mName}})-[:MAINTAINS]->(p:Package {id: ${pkgId}, name: ${pkgName}})`
+      );
+      written++;
+    } catch (err) {
+      failed++;
+      process.stderr.write(`\nfailed to write ${link.pkg} -> ${link.maintainer}: ${err.message}\n`);
+    }
+    process.stderr.write(`\rwrote ${written}/${links.length} maintainer links${failed ? ` (${failed} failed)` : ""}...`);
+  });
+  process.stderr.write("\n");
+}
+
 async function main() {
   const { root, depth, maxNodes } = parseArgs(process.argv.slice(2));
   console.log(`Crawling npm dependency graph from "${root}" (depth=${depth}, maxNodes=${maxNodes})`);
 
   const start = Date.now();
-  const { nodes, edges, truncated } = await crawl(root, depth, maxNodes);
-  console.log(`Discovered ${nodes.size} packages and ${edges.length} DEPENDS_ON edges in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+  const { nodes, edges, maintainedBy, truncated } = await crawl(root, depth, maxNodes);
+  const distinctMaintainers = new Set(maintainedBy.map((m) => m.maintainer)).size;
+  console.log(
+    `Discovered ${nodes.size} packages, ${edges.length} DEPENDS_ON edges and ` +
+    `${distinctMaintainers} maintainers in ${((Date.now() - start) / 1000).toFixed(1)}s`
+  );
 
   if (truncated) {
     console.log(
@@ -172,9 +223,18 @@ async function main() {
     return;
   }
 
-  console.log(`Writing to HydraDB...`);
+  console.log(`Writing dependency edges to HydraDB...`);
   await writeEdges(edges);
-  console.log(`Done. Ingested ${nodes.size} packages, ${edges.length} edges rooted at "${root}".`);
+
+  if (maintainedBy.length > 0) {
+    console.log(`Writing maintainer edges to HydraDB...`);
+    await writeMaintainers(maintainedBy);
+  }
+
+  console.log(
+    `Done. Ingested ${nodes.size} packages, ${edges.length} dependency edges and ` +
+    `${maintainedBy.length} publish-rights links rooted at "${root}".`
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

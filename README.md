@@ -6,7 +6,18 @@ Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as
 
 ## Status
 
-Working end-to-end, including the demo UI: npm registry ingestion into HydraDB, blast-radius queries, a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), typosquat detection (edit distance + live npm download-count confirmation), and a zero-dependency API + browser visualization (`node src/server.js`, then open `http://127.0.0.1:8787`) that renders a package's blast radius as a radial graph, colored by hop distance from the compromised package, alongside a live typosquat panel.
+Working end-to-end, including the demo UI. Of the six questions the track brief asks a submission to answer when a package is compromised, this answers four:
+
+| Brief's question | Status |
+|---|---|
+| What is the complete blast radius? | ✅ `src/blastRadius.js` |
+| Which services are transitively exposed? | ✅ same traversal, with hop distance |
+| Which packages share maintainers with it? | ✅ `src/sharedMaintainers.js` |
+| Are there likely typosquats nearby? | ✅ `src/typosquat.js` |
+| Which version introduced the vulnerability? | ❌ graph is version-less today |
+| Which apps resolved the bad version while live? | ❌ needs lockfile ingestion |
+
+Plus a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories) and a zero-dependency API + browser visualization (`node src/server.js`, then `http://127.0.0.1:8787`).
 
 ### Running the demo UI
 
@@ -17,6 +28,33 @@ node src/server.js --port=8787
 Then open `http://127.0.0.1:8787`, type a package name that's already in the graph (the input autocompletes from `/api/packages`), and click "Compute blast radius". Try `qs` or `debug` after ingesting `webpack` and `express` as below.
 
 **Demo-ready example:** ingesting `webpack` and `express` (`node src/ingest.js webpack --depth=4 --max-nodes=400` then `node src/ingest.js express --depth=5 --max-nodes=300` into the same graph) produces 135 real packages that include [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
+
+### The second attack path: shared publish rights
+
+```bash
+node src/sharedMaintainers.js body-parser
+```
+
+A dependency-only blast radius answers "what pulls this code in". It does not answer "who else can push code here" — and in the incident the track brief opens with, that was the actual vector: the TanStack worm published 84 malicious artifacts across 42 packages in six minutes through compromised *publish access*. Those packages did not depend on each other. They shared a credential.
+
+So the graph also models `(:Package)-[:MAINTAINED_BY]->(:Maintainer)` (mirrored as `MAINTAINS`), and asks the question as a two-hop traversal across two different edge types:
+
+```cypher
+MATCH (target:Package {id: <id>})-[:MAINTAINED_BY]->(m:Maintainer)-[:MAINTAINS]->(sibling:Package)
+RETURN m.name, sibling.name
+```
+
+The gap between the two answers is the point. On the `express` graph:
+
+| Package | Exposed via dependencies | Reachable via shared publish rights | **Missed by dependencies alone** |
+|---|---|---|---|
+| `qs` | 2 | 3 | **3** |
+| `debug` | 6 | 1 | **1** |
+| `body-parser` | 1 | 36 | **35** |
+
+`body-parser` looks almost harmless through a dependency lens — one exposed package. Widen to publish rights and 35 further packages come into range of the same credentials. The UI reports both side by side for exactly this reason.
+
+> Note: this models *blast radius*, not wrongdoing. These are the legitimate maintainers of widely-used packages; the point is that their credentials are a high-value target, which is what makes the exposure worth measuring.
 
 ### Correctness eval
 
@@ -49,10 +87,12 @@ The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the si
 
 ## How HydraDB is used
 
-Every package is a `Package` vertex; every dependency relationship is written as **two** mirrored edges:
+The graph has two vertex types and four edge types:
 
-- `(dependent)-[:DEPENDS_ON]->(dependency)` — the natural direction
+- `(dependent:Package)-[:DEPENDS_ON]->(dependency:Package)` — the natural direction
 - `(dependency)-[:REQUIRED_BY]->(dependent)` — the reverse, written at ingest time
+- `(package)-[:MAINTAINED_BY]->(maintainer:Maintainer)` — publish rights
+- `(maintainer)-[:MAINTAINS]->(package)` — the reverse, likewise
 
 The blast-radius query is a variable-length forward traversal over `REQUIRED_BY` starting from the compromised package:
 
@@ -62,6 +102,10 @@ RETURN DISTINCT dependent.name
 ```
 
 This is the core "why HydraDB" of the project: computing everything transitively exposed by a compromise is a multi-hop graph traversal, not something a vector index or a flat table can answer.
+
+### Why vertex ids are hashed and namespaced
+
+HydraDB keys vertices on `id` alone — **the label does not scope identity**, and labels accumulate. MERGE-ing a `:Package` onto an id already held by a `:Maintainer` silently overwrites that vertex's properties and leaves a single vertex answering to both labels while carrying both sets of edges (verified against the running node). Since `id` must be an integer, names are hashed — and because npm users routinely publish a package under their own handle, maintainer ids are hashed in a **separate namespace** (`maintainerId()` in `src/hydra.js`). Without that, maintainer `ljharb` and a package named `ljharb` would fuse into one vertex with certainty.
 
 ### Why the mirrored edge
 
