@@ -1,0 +1,66 @@
+const HYDRA_HTTP_ADDR = process.env.HYDRA_HTTP_ADDR ?? "http://127.0.0.1:8443";
+const HYDRA_TOKEN = process.env.HYDRA_TOKEN ?? "local-development-token-32-bytes";
+const HYDRA_NAMESPACE = process.env.HYDRA_NAMESPACE ?? "default";
+const HYDRA_GRAPH = process.env.HYDRA_GRAPH ?? "default";
+const HYDRA_CELL = process.env.HYDRA_CELL ?? "cell-0";
+
+// Runs one openCypher statement against HydraDB's HTTP query API and returns
+// rows as plain JS values (unwrapped from HydraDB's {type, value} envelopes).
+//
+// The documented HTTP API (README "Verify a running node") only shows a bare
+// `query` string, no parameter binding — so query strings are built with
+// cypherString() below rather than relying on undocumented param support.
+export async function runQuery(query) {
+  const res = await fetch(`${HYDRA_HTTP_ADDR}/v1/graphs/${HYDRA_GRAPH}/query`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${HYDRA_TOKEN}`,
+      "X-Graph-Namespace": HYDRA_NAMESPACE,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ cell_id: HYDRA_CELL, query }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HydraDB query failed (${res.status}): ${text}`);
+  }
+
+  const body = await res.json();
+  const columns = body.columns ?? [];
+  return (body.rows ?? []).map((row) =>
+    Object.fromEntries(columns.map((col, i) => [col, unwrap(row[i])]))
+  );
+}
+
+function unwrap(cell) {
+  if (cell && typeof cell === "object" && "value" in cell) return cell.value;
+  return cell;
+}
+
+// Escapes a JS string for safe inline use as a single-quoted Cypher string literal.
+export function cypherString(value) {
+  return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+
+// HydraDB's current (alpha) MERGE implementation only upserts vertices by an
+// *integer* `id` property — MERGE with a string key, UNWIND-batched MERGE,
+// and MERGE-then-SET all error out (confirmed empirically against the local
+// dev node; see README's documented endpoints/verify flow for the baseline
+// this was probed from). So package names are mapped to stable integer ids
+// via this hash, and `name` is carried as an ordinary string property set
+// inline in the same MERGE — the one pattern that reliably works:
+//   MERGE (a:Package {id: 111, name: 'express'})-[:DEPENDS_ON]->(b:Package {id: 222, name: 'body-parser'})
+// FNV-1a 64-bit, folded into JS's safe integer range (2^53) rather than a
+// bare 32-bit hash, to keep collision risk negligible at hackathon scale
+// (thousands of packages).
+export function packageId(name) {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < name.length; i++) {
+    hash ^= BigInt(name.charCodeAt(i));
+    hash = (hash * prime) & 0xffffffffffffffffn;
+  }
+  return Number(hash & 0x1fffffffffffffn); // mask to 53 bits
+}
+

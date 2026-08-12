@@ -1,0 +1,4 @@
+node_modules/
+hydradb-data/
+.env
+*.log

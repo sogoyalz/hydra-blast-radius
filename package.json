@@ -1,0 +1,12 @@
+{
+  "name": "hydra-blast-radius",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Supply-chain blast-radius analysis for npm packages, built on HydraDB — Hack Hydra Track 2A submission",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "ingest": "node src/ingest.js",
+    "blast-radius": "node src/blastRadius.js"
+  }
+}
