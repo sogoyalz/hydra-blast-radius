@@ -6,7 +6,15 @@ Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as
 
 ## Status
 
-Working end-to-end: npm registry ingestion into HydraDB, blast-radius queries, a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), and typosquat detection (edit distance + live npm download-count confirmation, validated against real near-miss packages on the registry). Still to come: the API/frontend layer.
+Working end-to-end, including the demo UI: npm registry ingestion into HydraDB, blast-radius queries, a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), typosquat detection (edit distance + live npm download-count confirmation), and a zero-dependency API + browser visualization (`node src/server.js`, then open `http://127.0.0.1:8787`) that renders a package's blast radius as a radial graph, colored by hop distance from the compromised package, alongside a live typosquat panel.
+
+### Running the demo UI
+
+```bash
+node src/server.js --port=8787
+```
+
+Then open `http://127.0.0.1:8787`, type a package name that's already in the graph (the input autocompletes from `/api/packages`), and click "Compute blast radius". Try `qs` or `debug` after ingesting `webpack` and `express` as below.
 
 **Demo-ready example:** ingesting `webpack` and `express` (`node src/ingest.js webpack --depth=4 --max-nodes=400` then `node src/ingest.js express --depth=5 --max-nodes=300` into the same graph) produces 135 real packages that include [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
 

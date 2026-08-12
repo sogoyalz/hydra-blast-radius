@@ -33,6 +33,46 @@ export async function blastRadius(name, depth = 6) {
   return rows.map((r) => r.name).filter(Boolean);
 }
 
+// Same question as blastRadius(), but also reports each dependent's hop
+// distance from the target and the DEPENDS_ON edges connecting the whole
+// set — the extra shape a graph visualization needs (radial-by-hop layout).
+// Every step is still a real HydraDB traversal query, not a client-side
+// re-implementation of the graph walk: hop distance is found by re-running
+// the variable-length query at increasing depth and diffing newly
+// discovered names against the previous depth's result, stopping once a
+// depth stops finding anything new (which is guaranteed to mean deeper
+// depths won't find more, since results are monotonically cumulative).
+export async function blastRadiusWithHops(name, maxDepth = 6) {
+  const seen = new Map(); // name -> hop
+  let previousSize = 0;
+  for (let hop = 1; hop <= maxDepth; hop++) {
+    const atThisDepth = await blastRadius(name, hop);
+    if (atThisDepth.length === previousSize) break;
+    for (const pkg of atThisDepth) {
+      if (!seen.has(pkg)) seen.set(pkg, hop);
+    }
+    previousSize = atThisDepth.length;
+  }
+
+  const nodeNames = [name, ...seen.keys()];
+  const nameSet = new Set(nodeNames);
+  const edges = [];
+  for (const pkg of nodeNames) {
+    const rows = await runQuery(
+      `MATCH (a:Package {id: ${packageId(pkg)}})-[:DEPENDS_ON]->(b:Package) RETURN b.name AS name`
+    );
+    for (const row of rows) {
+      if (nameSet.has(row.name)) edges.push({ from: pkg, to: row.name });
+    }
+  }
+
+  return {
+    target: name,
+    nodes: [{ name, hop: 0 }, ...[...seen.entries()].map(([n, hop]) => ({ name: n, hop }))],
+    edges,
+  };
+}
+
 async function main() {
   const { name, depth } = parseArgs(process.argv.slice(2));
 

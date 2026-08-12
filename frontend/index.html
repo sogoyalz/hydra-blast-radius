@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Supply Chain Blast Radius — HydraDB</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121820;
+    --border: #223041;
+    --text: #e6edf3;
+    --muted: #8b98a5;
+    --accent: #ff5c33;
+    --accent-soft: #ff5c3333;
+    --hop1: #ffb020;
+    --hop2: #4fc3f7;
+    --hop3: #7e57c2;
+    --hopN: #66bb6a;
+    --danger: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .tag {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  main {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: 0;
+    height: calc(100vh - 65px);
+  }
+  #graph-panel {
+    position: relative;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+  }
+  #controls {
+    display: flex;
+    gap: 10px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  input[type="text"], input[list] {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    min-width: 220px;
+  }
+  input[type="number"] {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    width: 64px;
+    font-size: 14px;
+  }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 9px 18px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status {
+    font-size: 13px;
+    color: var(--muted);
+    padding: 0 20px;
+    min-height: 20px;
+  }
+  #status.error { color: var(--danger); }
+  #svg-wrap {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+  }
+  svg { width: 100%; height: 100%; display: block; }
+  .node circle { stroke: var(--bg); stroke-width: 2px; cursor: pointer; }
+  .node text {
+    fill: var(--text);
+    font-size: 11px;
+    pointer-events: none;
+    text-anchor: middle;
+  }
+  .edge { stroke: #3a4a5c; stroke-width: 1.4px; fill: none; marker-end: url(#arrow); }
+  .ring { fill: none; stroke: var(--border); stroke-dasharray: 3 4; }
+  #sidebar {
+    padding: 20px;
+    overflow-y: auto;
+  }
+  #sidebar h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 24px 0 10px;
+  }
+  #sidebar h2:first-child { margin-top: 0; }
+  .legend { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+  .legend-row { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  #summary {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  #summary .big { font-size: 26px; font-weight: 700; color: var(--accent); }
+  .suspect {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    margin-right: 6px;
+  }
+  .badge.high { background: var(--danger); color: #fff; }
+  .badge.medium { background: var(--hop1); color: #000; }
+  .badge.low, .badge.coincidence { background: #2a3746; color: var(--muted); }
+  #datalist-hint { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Supply Chain Blast Radius</h1>
+  <span class="tag">Hack Hydra · Track 2A · built on HydraDB</span>
+</header>
+
+<main>
+  <div id="graph-panel">
+    <div id="controls">
+      <input id="pkg-input" type="text" list="pkg-list" placeholder="package name, e.g. qs" />
+      <datalist id="pkg-list"></datalist>
+      <label style="font-size:13px;color:var(--muted)">max hops
+        <input id="depth-input" type="number" value="6" min="1" max="10" />
+      </label>
+      <button id="go-btn">Compute blast radius</button>
+      <span id="datalist-hint"></span>
+    </div>
+    <div id="status"></div>
+    <div id="svg-wrap">
+      <svg id="graph">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#3a4a5c" />
+          </marker>
+        </defs>
+        <g id="rings"></g>
+        <g id="edges"></g>
+        <g id="nodes"></g>
+      </svg>
+    </div>
+  </div>
+
+  <div id="sidebar">
+    <h2>Result</h2>
+    <div id="summary">Enter a package above and compute its blast radius.</div>
+
+    <h2>Hop legend</h2>
+    <div class="legend">
+      <div class="legend-row"><span class="swatch" style="background:var(--accent)"></span> target (compromised package)</div>
+      <div class="legend-row"><span class="swatch" style="background:var(--hop1)"></span> 1 hop away</div>
+      <div class="legend-row"><span class="swatch" style="background:var(--hop2)"></span> 2 hops away</div>
+      <div class="legend-row"><span class="swatch" style="background:var(--hop3)"></span> 3 hops away</div>
+      <div class="legend-row"><span class="swatch" style="background:var(--hopN)"></span> 4+ hops away</div>
+    </div>
+
+    <h2>Typosquat scan <span id="typosquat-count" style="color:var(--muted);font-weight:400"></span></h2>
+    <div id="typosquat-results">Loading...</div>
+  </div>
+</main>
+
+<script>
+const HOP_COLORS = ["var(--accent)", "var(--hop1)", "var(--hop2)", "var(--hop3)"];
+const HOP_FALLBACK = "var(--hopN)";
+function hopColor(hop) { return HOP_COLORS[hop] ?? HOP_FALLBACK; }
+
+const svg = document.getElementById("graph");
+const ringsG = document.getElementById("rings");
+const edgesG = document.getElementById("edges");
+const nodesG = document.getElementById("nodes");
+const statusEl = document.getElementById("status");
+const summaryEl = document.getElementById("summary");
+const pkgInput = document.getElementById("pkg-input");
+const depthInput = document.getElementById("depth-input");
+const goBtn = document.getElementById("go-btn");
+const pkgList = document.getElementById("pkg-list");
+const datalistHint = document.getElementById("datalist-hint");
+
+const ns = "http://www.w3.org/2000/svg";
+function el(tag, attrs) {
+  const e = document.createElementNS(ns, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+async function loadPackageList() {
+  try {
+    const res = await fetch("/api/packages");
+    const { names } = await res.json();
+    pkgList.innerHTML = names.map((n) => `<option value="${n}">`).join("");
+    datalistHint.textContent = `${names.length} packages ingested`;
+  } catch {
+    datalistHint.textContent = "";
+  }
+}
+
+async function loadTyposquats() {
+  const container = document.getElementById("typosquat-results");
+  try {
+    const res = await fetch("/api/typosquat");
+    const { packageCount, suspects } = await res.json();
+    document.getElementById("typosquat-count").textContent = `(${packageCount} packages scanned)`;
+    if (suspects.length === 0) {
+      container.innerHTML = '<div style="color:var(--muted);font-size:13px">No suspicious near-miss names found.</div>';
+      return;
+    }
+    container.innerHTML = suspects
+      .map((s) => {
+        const cls = s.suspicion === "likely coincidence" ? "coincidence" : s.suspicion;
+        const ratio = s.downloadRatio === null ? "n/a" : (s.downloadRatio * 100).toFixed(2) + "%";
+        return `<div class="suspect">
+          <span class="badge ${cls}">${s.suspicion}</span>
+          <strong>${s.candidate}</strong> vs <strong>${s.resembles}</strong> (distance ${s.distance})<br/>
+          ${s.candidateWeeklyDownloads.toLocaleString()} downloads/wk vs ${s.resemblesWeeklyDownloads.toLocaleString()} (${ratio})
+        </div>`;
+      })
+      .join("");
+  } catch (err) {
+    container.innerHTML = `<div style="color:var(--danger);font-size:13px">Failed to load: ${err.message}</div>`;
+  }
+}
+
+function render(data) {
+  ringsG.innerHTML = "";
+  edgesG.innerHTML = "";
+  nodesG.innerHTML = "";
+
+  const rect = svg.getBoundingClientRect();
+  const cx = rect.width / 2;
+  const cy = rect.height / 2;
+  const maxHop = Math.max(...data.nodes.map((n) => n.hop));
+  const ringGap = Math.min(90, (Math.min(rect.width, rect.height) / 2 - 60) / Math.max(maxHop, 1));
+
+  // group nodes by hop, place evenly around each ring
+  const byHop = new Map();
+  for (const n of data.nodes) {
+    if (!byHop.has(n.hop)) byHop.set(n.hop, []);
+    byHop.get(n.hop).push(n);
+  }
+
+  const pos = new Map();
+  for (const [hop, nodesAtHop] of byHop) {
+    const r = hop * ringGap;
+    if (hop > 0) ringsG.appendChild(el("circle", { class: "ring", cx, cy, r }));
+    nodesAtHop.forEach((n, i) => {
+      const angle = (2 * Math.PI * i) / nodesAtHop.length - Math.PI / 2;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      pos.set(n.name, { x, y });
+    });
+  }
+
+  for (const e of data.edges) {
+    const a = pos.get(e.from);
+    const b = pos.get(e.to);
+    if (!a || !b) continue;
+    edgesG.appendChild(el("line", { class: "edge", x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
+  }
+
+  for (const n of data.nodes) {
+    const p = pos.get(n.name);
+    const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
+    const radius = n.hop === 0 ? 10 : 6;
+    g.appendChild(el("circle", { r: radius, fill: hopColor(n.hop) }));
+    const label = el("text", { y: -(radius + 5) });
+    label.textContent = n.name;
+    g.appendChild(label);
+    const title = el("title", {});
+    title.textContent = `${n.name} (${n.hop === 0 ? "target" : n.hop + " hop(s) away"})`;
+    g.appendChild(title);
+    nodesG.appendChild(g);
+  }
+}
+
+async function computeBlastRadius() {
+  const name = pkgInput.value.trim();
+  const depth = Number(depthInput.value) || 6;
+  if (!name) return;
+
+  statusEl.textContent = "Querying HydraDB...";
+  statusEl.className = "";
+  goBtn.disabled = true;
+
+  try {
+    const res = await fetch(`/api/blast-radius?name=${encodeURIComponent(name)}&depth=${depth}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "request failed");
+
+    render(data);
+    const exposedCount = data.nodes.length - 1;
+    summaryEl.innerHTML = `<div class="big">${exposedCount}</div>
+      package${exposedCount === 1 ? "" : "s"} transitively exposed if
+      <strong>${data.target}</strong> is compromised.<br/><br/>
+      Query answered by HydraDB in <strong>${data.latencyMs}ms</strong>
+      (${data.edges.length} edges walked).`;
+    statusEl.textContent = "";
+  } catch (err) {
+    statusEl.textContent = err.message;
+    statusEl.className = "error";
+    summaryEl.textContent = "No result.";
+  } finally {
+    goBtn.disabled = false;
+  }
+}
+
+goBtn.addEventListener("click", computeBlastRadius);
+pkgInput.addEventListener("keydown", (e) => { if (e.key === "Enter") computeBlastRadius(); });
+
+loadPackageList();
+loadTyposquats();
+</script>
+</body>
+</html>
