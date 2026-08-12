@@ -2,3 +2,9 @@ node_modules/
 hydradb-data/
 .env
 *.log
+
+# local editor/tooling state — never part of the project
+.code-review-graph/
+.vscode/
+.idea/
+.DS_Store
