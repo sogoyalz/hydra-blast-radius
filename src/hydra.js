@@ -33,9 +33,35 @@ export async function runQuery(query) {
   );
 }
 
+// HydraDB returns typed envelopes: {"type":"string","value":"express"},
+// {"type":"vertex_id","value":222}, {"type":"null"}. Note the null envelope
+// carries NO "value" key — returning it as-is would leak a truthy object
+// into results (a missing `name` would survive `.filter(Boolean)` and render
+// as "[object Object]"), so it is mapped explicitly to null.
 function unwrap(cell) {
-  if (cell && typeof cell === "object" && "value" in cell) return cell.value;
+  if (cell && typeof cell === "object") {
+    if (cell.type === "null") return null;
+    if ("value" in cell) return cell.value;
+  }
   return cell;
+}
+
+// Runs many independent queries with bounded concurrency, preserving input
+// order in the results. HydraDB answers a single traversal in tens of
+// milliseconds, so anything that fans out over N packages is dominated by
+// round-trip count, not by the engine — issuing those sequentially is what
+// makes a fast database look slow.
+export async function runQueriesConcurrent(queries, limit = 16) {
+  const results = new Array(queries.length);
+  let next = 0;
+  async function worker() {
+    while (next < queries.length) {
+      const i = next++;
+      results[i] = await runQuery(queries[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, queries.length) }, worker));
+  return results;
 }
 
 // Escapes a JS string for safe inline use as a single-quoted Cypher string literal.

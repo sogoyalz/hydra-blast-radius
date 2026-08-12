@@ -254,7 +254,21 @@ async function loadTyposquats() {
       container.innerHTML = '<div style="color:var(--muted);font-size:13px">No suspicious near-miss names found.</div>';
       return;
     }
-    container.innerHTML = suspects
+
+    // Lead with the verdict. Edit distance alone flags plenty of innocent
+    // names; the download-ratio signal is what separates a real typosquat
+    // from a coincidence, so the headline is the count that actually matters.
+    const actionable = suspects.filter((s) => s.suspicion === "high" || s.suspicion === "medium");
+    const verdict = actionable.length
+      ? `<strong style="color:var(--danger)">${actionable.length} likely typosquat${actionable.length === 1 ? "" : "s"}</strong> found.`
+      : `<strong style="color:var(--hopN)">No likely typosquats.</strong>`;
+    const summary = `<div style="font-size:12.5px;line-height:1.6;margin-bottom:12px;color:var(--muted)">
+      ${verdict} ${suspects.length} name${suspects.length === 1 ? "" : "s"} sat within edit distance 2 of a
+      popular package; download volume cleared ${suspects.length - actionable.length} of them as
+      unlikely impersonation.
+    </div>`;
+
+    container.innerHTML = summary + suspects
       .map((s) => {
         const cls = s.suspicion === "likely coincidence" ? "coincidence" : s.suspicion;
         const ratio = s.downloadRatio === null ? "n/a" : (s.downloadRatio * 100).toFixed(2) + "%";
@@ -341,8 +355,11 @@ async function computeBlastRadius() {
     summaryEl.innerHTML = `<div class="big">${exposedCount}</div>
       package${exposedCount === 1 ? "" : "s"} transitively exposed if
       <strong>${data.target}</strong> is compromised.<br/><br/>
-      Query answered by HydraDB in <strong>${data.latencyMs}ms</strong>
-      (${data.edges.length} edges walked).`;
+      <strong>${data.coreQueryMs}ms</strong> &mdash; single HydraDB traversal
+      answering the exposure question.<br/>
+      <span style="color:var(--muted)">${data.totalMs}ms total for
+      ${data.queryCount} queries, including the hop-distance and edge lookups
+      used only to draw the graph.</span>`;
     statusEl.textContent = "";
   } catch (err) {
     statusEl.textContent = err.message;

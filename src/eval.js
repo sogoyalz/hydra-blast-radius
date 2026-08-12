@@ -114,8 +114,11 @@ async function main() {
   const { root, depth, maxNodes, targets: targetArg } = parseArgs(process.argv.slice(2));
 
   console.log(`Crawling "${root}" (depth=${depth}, maxNodes=${maxNodes})...`);
-  const { nodes, edges } = await crawl(root, depth, maxNodes);
+  const { nodes, edges, truncated } = await crawl(root, depth, maxNodes);
   console.log(`Discovered ${nodes.size} packages, ${edges.length} edges.`);
+  if (truncated) {
+    console.log(`NOTE: hit the --max-nodes=${maxNodes} cap; this graph is partial.`);
+  }
 
   console.log(`Writing to HydraDB...`);
   await writeEdges(edges);

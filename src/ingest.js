@@ -55,18 +55,26 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
+// `maxNodes` is a hard cap on how many distinct packages end up in the
+// graph, and `visited` is exactly the set that gets written — every edge
+// emitted has both endpoints in `visited`, so the count reported to the
+// user matches what is actually in HydraDB. (An earlier version added the
+// whole frontier to `visited` before checking the cap, which both blew past
+// maxNodes and under-reported the true vertex count.)
+//
+// `truncated` is returned so callers can say so out loud: a blast radius
+// computed over a truncated graph is a *lower bound*, and silently
+// presenting a partial answer as complete is the one failure mode a
+// supply-chain tool cannot afford.
 export async function crawl(root, maxDepth, maxNodes) {
-  const visited = new Set();
-  const edges = []; // {from, to}
+  const visited = new Set([root]);
+  const edges = []; // {from, to} — both endpoints always in `visited`
   let frontier = [{ name: root, depth: 0 }];
+  let truncated = false;
 
-  while (frontier.length > 0 && visited.size < maxNodes) {
-    const toFetch = [];
-    for (const node of frontier) {
-      if (visited.has(node.name)) continue;
-      visited.add(node.name);
-      if (node.depth < maxDepth && visited.size <= maxNodes) toFetch.push(node);
-    }
+  while (frontier.length > 0) {
+    const toFetch = frontier.filter((node) => node.depth < maxDepth);
+    if (toFetch.length === 0) break;
 
     const results = await mapWithConcurrency(toFetch, CRAWL_CONCURRENCY, async (node) => {
       let deps;
@@ -82,8 +90,15 @@ export async function crawl(root, maxDepth, maxNodes) {
     for (const { node, deps } of results) {
       if (!deps) continue;
       for (const depName of Object.keys(deps)) {
+        if (!visited.has(depName)) {
+          if (visited.size >= maxNodes) {
+            truncated = true;
+            continue; // skip the edge too, so every edge endpoint stays in `visited`
+          }
+          visited.add(depName);
+          nextFrontier.push({ name: depName, depth: node.depth + 1 });
+        }
         edges.push({ from: node.name, to: depName });
-        if (!visited.has(depName)) nextFrontier.push({ name: depName, depth: node.depth + 1 });
       }
     }
     frontier = nextFrontier;
@@ -91,7 +106,7 @@ export async function crawl(root, maxDepth, maxNodes) {
   }
   process.stderr.write("\n");
 
-  return { nodes: visited, edges };
+  return { nodes: visited, edges, truncated };
 }
 
 // HydraDB's current MERGE implementation only upserts vertices by an integer
@@ -142,8 +157,15 @@ async function main() {
   console.log(`Crawling npm dependency graph from "${root}" (depth=${depth}, maxNodes=${maxNodes})`);
 
   const start = Date.now();
-  const { nodes, edges } = await crawl(root, depth, maxNodes);
+  const { nodes, edges, truncated } = await crawl(root, depth, maxNodes);
   console.log(`Discovered ${nodes.size} packages and ${edges.length} DEPENDS_ON edges in ${((Date.now() - start) / 1000).toFixed(1)}s`);
+
+  if (truncated) {
+    console.log(
+      `NOTE: hit the --max-nodes=${maxNodes} cap, so this crawl is partial. Blast-radius\n` +
+      `      results over this graph are a lower bound. Raise --max-nodes for full coverage.`
+    );
+  }
 
   if (edges.length === 0) {
     console.log("No edges to write — nothing ingested.");

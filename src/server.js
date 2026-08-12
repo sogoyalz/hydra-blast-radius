@@ -21,6 +21,9 @@ const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
 };
 
+// Invalidated whenever the ingested package count changes.
+let typosquatCache = null;
+
 function parsePort(argv) {
   for (const arg of argv) {
     const [key, value] = arg.replace(/^--/, "").split("=");
@@ -39,8 +42,11 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function serveStatic(req, res) {
-  const path = req.url === "/" ? "/index.html" : req.url;
+// Takes the parsed pathname, not the raw req.url: the raw form still
+// carries any query string ("/?x=1"), which turns into a bogus filename
+// and 404s the index page.
+async function serveStatic(pathname, res) {
+  const path = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
   const filePath = join(FRONTEND_DIR, path);
   if (!filePath.startsWith(FRONTEND_DIR)) {
     res.writeHead(403);
@@ -70,13 +76,20 @@ async function handleApi(req, res, url) {
 
     const start = Date.now();
     const result = await blastRadiusWithHops(name, depth);
-    return sendJson(res, 200, { ...result, latencyMs: Date.now() - start });
+    // coreQueryMs (the traversal that answers the question) is reported
+    // separately from totalMs (which also covers laying out the picture).
+    return sendJson(res, 200, { ...result, totalMs: Date.now() - start });
   }
 
   if (url.pathname === "/api/typosquat") {
+    // The scan hits the npm downloads API once per candidate, so its result
+    // is cached: it only changes when the ingested package set changes, and
+    // the frontend requests it on every page load.
     const names = await allIngestedPackageNames();
-    const suspects = await findTyposquats(names);
-    return sendJson(res, 200, { packageCount: names.length, suspects });
+    if (!typosquatCache || typosquatCache.packageCount !== names.length) {
+      typosquatCache = { packageCount: names.length, suspects: await findTyposquats(names) };
+    }
+    return sendJson(res, 200, typosquatCache);
   }
 
   if (url.pathname === "/api/packages") {
@@ -94,7 +107,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
     } else {
-      await serveStatic(req, res);
+      await serveStatic(url.pathname, res);
     }
   } catch (err) {
     console.error(err);
