@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# One-command setup: starts HydraDB, loads a real demo graph, serves the UI.
+#
+#   ./setup.sh
+#
+# Idempotent — safe to re-run. Re-running reuses a healthy container and skips
+# ingestion if the graph is already loaded. Use ./setup.sh --fresh to wipe the
+# database and start over.
+set -euo pipefail
+
+CONTAINER=hydradb
+PORT=${PORT:-8787}
+DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hydradb-data"
+TOKEN='local-development-token-32-bytes'
+FRESH=0
+[[ "${1:-}" == "--fresh" ]] && FRESH=1
+
+step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+fail() { printf '\n\033[31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
+
+# ---------------------------------------------------------------- prereqs
+command -v docker >/dev/null || fail "docker not found. Install Docker Desktop, or on macOS: brew install colima docker && colima start"
+command -v node   >/dev/null || fail "node not found. Node 18+ is required (it supplies the built-in fetch this project uses)."
+
+node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 18 ? 0 : 1)' \
+  || fail "Node 18+ required; found $(node --version). Older versions lack global fetch."
+
+if ! docker info >/dev/null 2>&1; then
+  fail "Docker is installed but no daemon is running.
+       Docker Desktop: open it and wait for it to start.
+       Colima:         colima start"
+fi
+
+# The published image is amd64-only; Apple Silicon needs explicit emulation.
+PLATFORM_ARG=()
+if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
+  PLATFORM_ARG=(--platform linux/amd64)
+fi
+
+# ---------------------------------------------------------------- database
+if [[ $FRESH -eq 1 ]]; then
+  step "Wiping existing database (--fresh)"
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  rm -rf "$DATA_DIR/store" "$DATA_DIR/cache"
+fi
+
+# LOCAL_PATH must already exist; graph-node will not create it.
+mkdir -p "$DATA_DIR/store" "$DATA_DIR/cache"
+printf '%s\n' "$TOKEN" > "$DATA_DIR/auth-token"
+
+if docker ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' | grep -q "$CONTAINER"; then
+  step "HydraDB already running — reusing it"
+else
+  step "Starting HydraDB"
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$CONTAINER" "${PLATFORM_ARG[@]}" \
+    --user "$(id -u):$(id -g)" \
+    -p 7687:7687 -p 8443:8443 -p 9090:9090 \
+    -v "$DATA_DIR:/data" \
+    -e CLOUD_PROVIDER=local \
+    -e LOCAL_PATH=/data/store \
+    -e GRAPH_NAMESPACE=default \
+    -e GRAPH_ID=default \
+    -e GRAPH_CELL_ID=cell-0 \
+    -e GRAPH_CELLS=cell-0 \
+    -e GRAPH_NODE_ID=node-0 \
+    -e GRAPH_DATA_CACHE_DIR=/data/cache \
+    -e GRAPH_AUTH_TOKEN_FILE=/data/auth-token \
+    -e GRAPH_ALLOW_PLAINTEXT=true \
+    -e RUST_MIN_STACK=33554432 \
+    ghcr.io/hydra-db/hydradb:latest >/dev/null
+fi
+
+step "Waiting for HydraDB to accept queries"
+for i in $(seq 1 60); do
+  if curl -fsS -m 2 http://127.0.0.1:9090/readyz >/dev/null 2>&1; then
+    echo "ready after ${i}s"
+    break
+  fi
+  if [[ $i -eq 60 ]]; then
+    docker logs --tail 30 "$CONTAINER" >&2 || true
+    fail "HydraDB did not become ready in 60s (logs above)."
+  fi
+  sleep 1
+done
+
+# ---------------------------------------------------------------- data
+ALREADY=$(node -e '
+import("./src/hydra.js").then(async ({ runQuery }) => {
+  try {
+    const rows = await runQuery("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+    console.log(rows.length);
+  } catch { console.log(0); }
+}).catch(() => console.log(0));
+' 2>/dev/null || echo 0)
+
+if [[ "${ALREADY:-0}" -gt 20 ]]; then
+  step "Graph already loaded (${ALREADY} packages) — skipping ingestion"
+else
+  step "Ingesting a real npm dependency graph (this hits the public npm registry)"
+  node src/ingest.js express --depth=4 --max-nodes=250 2>&1 | grep -vE '^\s*(wrote|visited)' || true
+  node src/ingest.js webpack --depth=3 --max-nodes=150 2>&1 | grep -vE '^\s*(wrote|visited)' || true
+fi
+
+# ---------------------------------------------------------------- serve
+step "Starting the demo server"
+cat <<EOF
+
+  Setup complete. Open:  http://127.0.0.1:${PORT}
+
+  Things worth trying:
+    body-parser   1 package exposed via dependencies, ~36 via shared publish
+                  rights — the gap a dependency-only scanner cannot see
+    qs            a package with 7 real GHSA advisories, reached through the
+                  genuine express -> body-parser -> qs chain
+    debug         a deeper multi-hop blast radius
+
+  From the command line instead:
+    node src/blastRadius.js qs
+    node src/sharedMaintainers.js body-parser
+    node src/typosquat.js
+    node src/eval.js koa --depth=3 --max-nodes=200   # run after ./setup.sh --fresh
+
+  Ctrl-C stops the server (HydraDB keeps running; 'docker rm -f hydradb' stops it).
+
+EOF
+
+exec node src/server.js --port="$PORT"
