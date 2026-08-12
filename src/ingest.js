@@ -54,7 +54,7 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-async function crawl(root, maxDepth, maxNodes) {
+export async function crawl(root, maxDepth, maxNodes) {
   const visited = new Set();
   const edges = []; // {from, to}
   let frontier = [{ name: root, depth: 0 }];
@@ -109,7 +109,7 @@ async function crawl(root, maxDepth, maxNodes) {
 // starting from a fixed X, which is exactly a forward traversal over
 // REQUIRED_BY. Mirroring the edge at write time is the standard way to get
 // O(1)-per-hop traversal in both directions out of a single ingest pass.
-async function writeEdges(edges) {
+export async function writeEdges(edges) {
   let written = 0;
   let failed = 0;
   // MERGE cannot be followed by another clause (including a second MERGE) in
@@ -154,7 +154,9 @@ async function main() {
   console.log(`Done. Ingested ${nodes.size} packages, ${edges.length} edges rooted at "${root}".`);
 }
 
-main().catch((err) => {
-  console.error("Ingestion failed:", err);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error("Ingestion failed:", err);
+    process.exit(1);
+  });
+}

@@ -49,7 +49,9 @@ async function main() {
   for (const pkg of exposed) console.log(`  - ${pkg}`);
 }
 
-main().catch((err) => {
-  console.error("Blast radius query failed:", err);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error("Blast radius query failed:", err);
+    process.exit(1);
+  });
+}
