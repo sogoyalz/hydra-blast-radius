@@ -6,7 +6,9 @@ Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as
 
 ## Status
 
-Working end-to-end: npm registry ingestion into HydraDB, blast-radius queries, a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), and typosquat detection (edit distance + live npm download-count confirmation, validated against real near-miss packages on the registry). Still to come: the API/frontend layer and scaling ingestion to a larger real-world graph.
+Working end-to-end: npm registry ingestion into HydraDB, blast-radius queries, a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), and typosquat detection (edit distance + live npm download-count confirmation, validated against real near-miss packages on the registry). Still to come: the API/frontend layer.
+
+**Demo-ready example:** ingesting `webpack` and `express` (`node src/ingest.js webpack --depth=4 --max-nodes=400` then `node src/ingest.js express --depth=5 --max-nodes=300` into the same graph) produces 135 real packages that include [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
 
 ### Typosquat detection
 
