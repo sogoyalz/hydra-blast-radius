@@ -6,7 +6,11 @@ Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as
 
 ## Status
 
-Early build (Day 1). Working so far: npm registry ingestion into HydraDB, and a working blast-radius query, both proven end-to-end on a real dependency tree (`express`). Typosquat detection, the API/frontend layer, and evaluation against real OSV/GHSA advisories are still to come.
+Working end-to-end: npm registry ingestion into HydraDB, blast-radius queries, a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), and typosquat detection (edit distance + live npm download-count confirmation, validated against real near-miss packages on the registry). Still to come: the API/frontend layer and scaling ingestion to a larger real-world graph.
+
+### Typosquat detection
+
+`node src/typosquat.js` scans every package name currently in the graph, flags anything within edit distance 2 of a popular reference package (`src/typosquat.js`'s `POPULAR_PACKAGES`), and confirms suspicion using live npm weekly download counts — a genuine typosquat has far fewer downloads than the package it resembles. This is deliberately two-signal: edit distance alone produces false positives (e.g. `isarray` is a real, independently popular package one edit from `is-array`, with *more* downloads — the download ratio correctly reclassifies this as "likely coincidence" rather than flagging it).
 
 ## How HydraDB is used
 

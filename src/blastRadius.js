@@ -9,6 +9,7 @@
 //
 // Usage: node src/blastRadius.js <package-name> [--depth=6]
 
+import { pathToFileURL } from "node:url";
 import { runQuery, packageId } from "./hydra.js";
 
 function parseArgs(argv) {
@@ -49,7 +50,7 @@ async function main() {
   for (const pkg of exposed) console.log(`  - ${pkg}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error("Blast radius query failed:", err);
     process.exit(1);

@@ -4,6 +4,7 @@
 //
 // Usage: node src/ingest.js <package-name> [--depth=4] [--max-nodes=300]
 
+import { pathToFileURL } from "node:url";
 import { runQuery, cypherString, packageId } from "./hydra.js";
 
 const REGISTRY = "https://registry.npmjs.org";
@@ -154,7 +155,7 @@ async function main() {
   console.log(`Done. Ingested ${nodes.size} packages, ${edges.length} edges rooted at "${root}".`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error("Ingestion failed:", err);
     process.exit(1);
