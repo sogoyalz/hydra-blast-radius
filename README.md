@@ -41,7 +41,9 @@ The gap is not academic. On the demo graph:
 ./setup.sh
 ```
 
-That's the whole setup. It starts HydraDB, waits for it to accept queries, ingests a real npm dependency graph from the public registry, and serves the UI at `http://127.0.0.1:8787`. **Cold start to working UI is about 25 seconds**; re-running reuses what's already there and comes up in ~2s. Requires Docker and Node 18+ — the script checks both and tells you exactly what to do if either is missing. `./setup.sh --fresh` wipes the database and starts over.
+That's the whole setup. It starts HydraDB, waits for it to accept queries, ingests a real npm dependency graph from the public registry, and serves the UI at `http://127.0.0.1:8787`. **Cold start to working UI is about 16 seconds**; re-running reuses what's already there and comes up in ~2s. Requires Docker and Node 18+ — the script checks both and tells you exactly what to do if either is missing. `./setup.sh --fresh` wipes the database and starts over.
+
+> **Clone somewhere under your home directory.** HydraDB writes its store to a bind-mounted `hydradb-data/` as your own user, so the repo has to sit on a path your Docker VM shares writably. Some `/tmp` locations are mounted read-only or as root (this bites under Colima), and Docker Desktop only shares the directories in its File Sharing list. If you hit it, setup stops in about two seconds and says so explicitly rather than leaving you guessing.
 
 Once it's up, try **`body-parser`**: one package exposed through dependencies, ~36 through shared publish rights. That gap is the point of the project.
 

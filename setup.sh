@@ -87,6 +87,23 @@ for i in $(seq 1 60); do
     echo "ready after ${i}s"
     break
   fi
+  # Fail fast if the container already died rather than waiting out the full
+  # timeout on a process that is never coming back. The common cause is the
+  # bind mount: the container writes its store as the host user, so if the
+  # repo sits on a path the Docker VM shares read-only or as root (some
+  # /tmp locations under Colima, or a directory outside Docker Desktop's
+  # File Sharing list), graph-node exits immediately with EACCES.
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" == "false" ]]; then
+    docker logs --tail 30 "$CONTAINER" >&2 || true
+    if docker logs "$CONTAINER" 2>&1 | grep -qi "permission denied"; then
+      fail "HydraDB could not write to $DATA_DIR (permission denied, logs above).
+       The container writes as your user, so the repo must live on a path your
+       Docker VM shares writably — a directory under your home folder is the
+       safe choice. Re-clone there and re-run, or add this path to Docker
+       Desktop's File Sharing settings."
+    fi
+    fail "HydraDB exited during startup (logs above)."
+  fi
   if [[ $i -eq 60 ]]; then
     docker logs --tail 30 "$CONTAINER" >&2 || true
     fail "HydraDB did not become ready in 60s (logs above)."
