@@ -19,6 +19,17 @@
 // real OSV advisories so the demo has a genuine "this package actually has
 // a known CVE" narrative, not just a synthetic example.
 //
+// WHAT THIS DOES AND DOES NOT PROVE. It is a correctness gate on the
+// ingest -> store -> traverse round trip: it answers "does HydraDB return
+// exactly the set that is actually reachable in the graph we wrote". It is
+// NOT a measure of vulnerability-detection accuracy against OSV/GHSA, and
+// 1.00/1.00 here should not be read as one — the ground truth is BFS over
+// the same edge list that was just written, so the score can only drop if
+// ingestion or traversal is broken. That makes it a strong regression test
+// and a weak accuracy claim, and it is reported as such. Measuring true
+// detection accuracy needs the organizers' held-out advisory set, which
+// entrants do not have.
+//
 // Note: HydraDB accumulates whatever was previously ingested (that's the
 // desired behavior for a real ecosystem graph — more ingested history means
 // more complete blast-radius answers). This eval's precision comparison is
@@ -43,9 +54,26 @@ function parseArgs(argv) {
   const opts = { root, depth: 3, maxNodes: 150, targets: null };
   for (const arg of rest) {
     const [key, value] = arg.replace(/^--/, "").split("=");
-    if (key === "depth") opts.depth = Number(value);
-    if (key === "max-nodes") opts.maxNodes = Number(value);
-    if (key === "targets") opts.targets = value.split(",").map((s) => s.trim());
+    // Same validation as ingest.js: Number("abc") is NaN, and every
+    // comparison against NaN is false, so an unnoticed typo silently turns
+    // the crawl cap or the depth bound off instead of erroring. An eval that
+    // quietly measured the wrong thing would be worse than one that stopped.
+    if (key === "depth" || key === "max-nodes") {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1) {
+        console.error(`--${key} must be a positive integer, got "${value}"`);
+        process.exit(1);
+      }
+      if (key === "depth") opts.depth = n;
+      else opts.maxNodes = n;
+    }
+    if (key === "targets") {
+      opts.targets = value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (opts.targets.length === 0) {
+        console.error(`--targets needs at least one package name`);
+        process.exit(1);
+      }
+    }
   }
   return opts;
 }
@@ -84,30 +112,54 @@ function precisionRecall(predicted, actual) {
   return { precision, recall, f1, truePositives: tp };
 }
 
-async function fetchOsvAdvisories(packageName) {
+// OSV lookups are shared between target selection and the results table, so
+// each package is fetched at most once per run.
+const osvCache = new Map();
+async function osvAdvisoryCount(packageName) {
+  if (osvCache.has(packageName)) return osvCache.get(packageName);
+  let count = 0;
   try {
     const res = await fetch("https://api.osv.dev/v1/query", {
       method: "POST",
       body: JSON.stringify({ package: { name: packageName, ecosystem: "npm" } }),
     });
-    if (!res.ok) return [];
-    const body = await res.json();
-    return body.vulns ?? [];
+    if (res.ok) {
+      const body = await res.json();
+      count = (body.vulns ?? []).length;
+    }
   } catch {
-    return [];
+    count = 0;
   }
+  osvCache.set(packageName, count);
+  return count;
 }
 
-// Picks a handful of non-trivial targets automatically: packages with the
-// most incoming edges (most depended-upon), which make the most interesting
-// blast-radius demos.
-function pickDefaultTargets(edges, count = 5) {
+// Picks targets that make the eval say something.
+//
+// Ranking purely by in-degree (most depended-upon) gives the biggest blast
+// radii, but in a typical npm tree the highest-in-degree packages are stable
+// low-level utilities — `statuses`, `depd`, `content-type` — that have never
+// had an advisory. That made the OSV column print all zeros on every default
+// run, so the ground-truth cross-reference looked like a dead integration
+// even though it works. Instead: rank a wider slice by in-degree, prefer the
+// ones carrying real advisories, then backfill by in-degree so the table
+// still covers the most-connected packages.
+async function pickDefaultTargets(edges, count = 5) {
   const inDegree = new Map();
   for (const { to } of edges) inDegree.set(to, (inDegree.get(to) ?? 0) + 1);
-  return [...inDegree.entries()]
+  const ranked = [...inDegree.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, count)
     .map(([name]) => name);
+
+  const pool = ranked.slice(0, Math.max(count * 4, 20));
+  const counts = await Promise.all(pool.map((name) => osvAdvisoryCount(name)));
+  const picked = pool.filter((_, i) => counts[i] > 0).slice(0, count);
+
+  for (const name of ranked) {
+    if (picked.length >= count) break;
+    if (!picked.includes(name)) picked.push(name);
+  }
+  return picked;
 }
 
 async function main() {
@@ -131,7 +183,7 @@ async function main() {
   console.log(`Writing to HydraDB...`);
   await writeEdges(edges);
 
-  const targets = targetArg ?? pickDefaultTargets(edges);
+  const targets = targetArg ?? (await pickDefaultTargets(edges));
   console.log(`\nEvaluating ${targets.length} target(s): ${targets.join(", ")}\n`);
 
   const rows = [];
@@ -143,7 +195,7 @@ async function main() {
     const latencyMs = Date.now() - start;
 
     const { precision, recall, f1, truePositives } = precisionRecall(hydraResult, truth);
-    const advisories = await fetchOsvAdvisories(target);
+    const knownAdvisories = await osvAdvisoryCount(target);
 
     rows.push({
       target,
@@ -154,7 +206,7 @@ async function main() {
       recall,
       f1,
       latencyMs,
-      knownAdvisories: advisories.length,
+      knownAdvisories,
     });
   }
 
@@ -175,8 +227,10 @@ async function main() {
   const allMatch = rows.every((r) => r.precision === 1 && r.recall === 1);
   console.log(
     allMatch
-      ? "\nAll targets: HydraDB's blast radius exactly matches the independently computed ground truth."
-      : "\nMismatch found — HydraDB's traversal disagrees with the in-memory ground truth on at least one target."
+      ? "\nPASS — HydraDB's blast radius exactly matches the independently computed ground truth\n" +
+        "       on every target. This gates the ingest -> store -> traverse round trip; it is not\n" +
+        "       a vulnerability-detection accuracy score (see the note at the top of this file)."
+      : "\nFAIL — HydraDB's traversal disagrees with the in-memory ground truth on at least one target."
   );
 }
 

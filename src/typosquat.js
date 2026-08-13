@@ -64,15 +64,29 @@ async function fetchWeeklyDownloads(name) {
 // package (and isn't the popular package itself), ranked by how suspicious
 // they look: close in spelling AND far lower in download volume than the
 // package they resemble.
+// Absolute edit distance is close to meaningless on very short names: "ms"
+// is one edit from "qs" and "acorn" is two from "cors", and neither pair has
+// anything to do with impersonation — they are simply short. Both filters
+// below exist to keep that noise out of the report, because a scanner that
+// cries wolf on `ms` is one nobody reads.
+const MIN_NAME_LENGTH = 4;
+// Distance must also be small *relative* to the name, so one edit in a
+// 2-character name is rejected while one edit in "express" is not. 0.34
+// keeps the genuinely interesting cases (isarray/is-array at 0.14,
+// reqeusts/request at 0.29) and drops the short-name coincidences.
+const MAX_DISTANCE_RATIO = 0.34;
+
 export async function findTyposquats(candidateNames, maxDistance = 2) {
   const popularSet = new Set(POPULAR_PACKAGES);
   const suspects = [];
 
   for (const candidate of candidateNames) {
     if (popularSet.has(candidate)) continue;
+    if (candidate.length < MIN_NAME_LENGTH) continue;
     let closest = null;
     let closestDistance = Infinity;
     for (const popular of POPULAR_PACKAGES) {
+      if (popular.length < MIN_NAME_LENGTH) continue;
       // Skip pairs where length differs too much — cheap short-circuit
       // before paying for the full DP table.
       if (Math.abs(candidate.length - popular.length) > maxDistance) continue;
@@ -82,7 +96,12 @@ export async function findTyposquats(candidateNames, maxDistance = 2) {
         closest = popular;
       }
     }
-    if (closest && closestDistance > 0 && closestDistance <= maxDistance) {
+    if (
+      closest &&
+      closestDistance > 0 &&
+      closestDistance <= maxDistance &&
+      closestDistance / Math.min(candidate.length, closest.length) <= MAX_DISTANCE_RATIO
+    ) {
       suspects.push({ candidate, resembles: closest, distance: closestDistance });
     }
   }

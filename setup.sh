@@ -131,6 +131,13 @@ else
   # non-zero exit trips `set -e` and stops with a real error.
   node src/ingest.js express --depth=4 --max-nodes=250
   node src/ingest.js webpack --depth=3 --max-nodes=150
+  # "expres" is a real package published to npm — a genuine typosquat of
+  # express, with ~6k weekly downloads against express's ~127M. It is
+  # ingested so the typosquat panel has an actual positive to show instead
+  # of an empty result. Nothing synthetic: the detector is being pointed at
+  # a real squatted name that someone really registered. It has no
+  # dependencies, so it enters the graph through its publish-rights edge.
+  node src/ingest.js expres --depth=1 --max-nodes=20
 
   LOADED=$(node -e '
   import("./src/hydra.js").then(async ({ runQuery }) => {

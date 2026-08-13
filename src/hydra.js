@@ -7,10 +7,26 @@ const HYDRA_CELL = process.env.HYDRA_CELL ?? "cell-0";
 // Runs one openCypher statement against HydraDB's HTTP query API and returns
 // rows as plain JS values (unwrapped from HydraDB's {type, value} envelopes).
 //
-// The documented HTTP API (README "Verify a running node") only shows a bare
-// `query` string, no parameter binding — so query strings are built with
-// cypherString() below rather than relying on undocumented param support.
-export async function runQuery(query) {
+// Ordinary reads and writes build their query strings with cypherString()
+// below rather than binding values, because the documented HTTP API only
+// shows a bare `query` string.
+//
+// `parameters` exists for the native path procedures (algo.SSpaths and
+// friends), which cannot be called any other way — `algo.SSpaths({sourceNode:
+// 123, ...})` is rejected, the source vertex has to arrive as a bound
+// parameter. Two things about that binding were found only by probing, and
+// both are easy to lose an afternoon to:
+//
+//   * The request field is `parameters`. A field named `params` is accepted
+//     by the transport and then silently ignored, so the server answers
+//     "missing OpenCypher query parameter $sourceNode" while the parameter
+//     is sitting right there in the request body.
+//   * Only scalars bind. A list parameter comes back as "composite parameter
+//     $x is only supported as an UNWIND input", so relTypes has to be an
+//     inline list literal even though sourceNode must not be inline.
+export async function runQuery(query, parameters) {
+  const payload = { cell_id: HYDRA_CELL, query };
+  if (parameters) payload.parameters = parameters;
   const res = await fetch(`${HYDRA_HTTP_ADDR}/v1/graphs/${HYDRA_GRAPH}/query`, {
     method: "POST",
     headers: {
@@ -18,7 +34,7 @@ export async function runQuery(query) {
       "X-Graph-Namespace": HYDRA_NAMESPACE,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ cell_id: HYDRA_CELL, query }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {

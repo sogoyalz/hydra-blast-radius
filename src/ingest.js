@@ -239,13 +239,28 @@ async function main() {
     );
   }
 
-  if (edges.length === 0) {
-    console.log("No edges to write — nothing ingested.");
+  if (edges.length === 0 && maintainedBy.length === 0) {
+    console.log("Nothing to write — no dependencies and no maintainers found.");
     return;
   }
 
-  console.log(`Writing dependency edges to HydraDB...`);
-  const depResult = await writeEdges(edges);
+  let depResult = { written: 0, failed: 0 };
+  if (edges.length > 0) {
+    console.log(`Writing dependency edges to HydraDB...`);
+    depResult = await writeEdges(edges);
+  } else {
+    // A package with no dependencies used to be dropped entirely here, which
+    // silently excluded exactly the shape a typosquat usually takes: freshly
+    // published, zero dependencies, riding on a name. Its publish-rights
+    // links still carry it into the graph — and they have to, because
+    // HydraDB rejects a bare single-vertex MERGE outside UNWIND ("only
+    // one-hop edge patterns are executable in Query engine MERGE"), so an
+    // edge is the only way to create the vertex at all.
+    console.log(
+      `"${root}" has no dependencies — writing its publish-rights links so the\n` +
+      `package still enters the graph.`
+    );
+  }
 
   let maintResult = { failed: 0 };
   if (maintainedBy.length > 0) {

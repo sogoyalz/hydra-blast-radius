@@ -18,6 +18,7 @@
     --hop3: #7e57c2;
     --hopN: #66bb6a;
     --danger: #ff5c5c;
+    --maintainer: #c586c0;
   }
   * { box-sizing: border-box; }
   body {
@@ -116,11 +117,22 @@
     stroke-linejoin: round;
   }
   .edge { stroke: #3a4a5c; stroke-width: 1.4px; fill: none; marker-end: url(#arrow); }
+  /* Publish-rights edges are drawn dashed and unarrowed to read as a
+     different KIND of relationship from a dependency, not a weaker one:
+     these are the edges a dependency scanner cannot see at all. */
+  .edge-cred { stroke: var(--danger); stroke-width: 1.1px; fill: none; stroke-dasharray: 4 4; opacity: 0.45; }
+  .edge-cred.edge-hot { stroke: var(--danger); stroke-width: 2.4px; opacity: 1; stroke-dasharray: none; }
   /* A traced path: the specific chain that causes an exposure, lit up over
      the rest of the graph so the mechanism is visible, not just membership. */
   .edge.edge-hot { stroke: var(--accent); stroke-width: 2.6px; }
   .node.node-hot circle { stroke: var(--accent); stroke-width: 3px; }
   .node.node-hot text { fill: var(--accent); font-weight: 700; }
+  .node.node-hot rect { stroke: var(--accent); stroke-width: 3px; }
+  /* Marks a package that the dependency traversal already found but which is
+     ALSO in range of the target's publish credentials — i.e. exposed twice
+     over. Drawn as a halo rather than a colour change so its hop colour
+     still reads. */
+  .cred-halo { fill: none; stroke: var(--danger); stroke-width: 1.2px; stroke-dasharray: 2 3; opacity: 0.8; }
   .ring { fill: none; stroke: var(--border); stroke-dasharray: 3 4; }
   #sidebar {
     padding: 20px;
@@ -168,6 +180,14 @@
   .badge.medium { background: var(--hop1); color: #000; }
   .badge.low, .badge.coincidence { background: #2a3746; color: var(--muted); }
   #datalist-hint { font-size: 11px; color: var(--muted); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.92em;
+    background: #1b2531;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
 </style>
 </head>
 <body>
@@ -219,13 +239,22 @@
       a maintainer with it.</span>
     </div>
 
-    <h2>Hop legend</h2>
+    <h2>Legend</h2>
     <div class="legend">
       <div class="legend-row"><span class="swatch" style="background:var(--accent)"></span> target (compromised package)</div>
       <div class="legend-row"><span class="swatch" style="background:var(--hop1)"></span> 1 hop away</div>
       <div class="legend-row"><span class="swatch" style="background:var(--hop2)"></span> 2 hops away</div>
       <div class="legend-row"><span class="swatch" style="background:var(--hop3)"></span> 3 hops away</div>
       <div class="legend-row"><span class="swatch" style="background:var(--hopN)"></span> 4+ hops away</div>
+      <div class="legend-row" style="margin-top:8px">
+        <span class="swatch" style="background:var(--maintainer);border-radius:2px"></span>
+        maintainer (square = different vertex type)
+      </div>
+      <div class="legend-row"><span class="swatch" style="background:var(--danger)"></span> reachable <em>only</em> via publish rights</div>
+      <div class="legend-row">
+        <span class="swatch" style="background:transparent;border:1px dashed var(--danger)"></span>
+        in the dependency tree <em>and</em> in credential range
+      </div>
     </div>
 
     <h2>Typosquat scan <span id="typosquat-count" style="color:var(--muted);font-weight:400"></span></h2>
@@ -304,16 +333,26 @@ async function loadTyposquats() {
     const verdict = actionable.length
       ? `<strong style="color:var(--danger)">${actionable.length} likely typosquat${actionable.length === 1 ? "" : "s"}</strong> found.`
       : `<strong style="color:var(--hopN)">No likely typosquats.</strong>`;
+    // Only mention the cleared names when there are some — "cleared 0 of
+    // them" reads like a bug rather than a result.
+    const cleared = suspects.length - actionable.length;
+    const clearedText = cleared > 0
+      ? ` Download volume cleared ${cleared} other${cleared === 1 ? "" : "s"} as unlikely impersonation.`
+      : "";
     const summary = `<div style="font-size:12.5px;line-height:1.6;margin-bottom:12px;color:var(--muted)">
-      ${verdict} ${suspects.length} name${suspects.length === 1 ? "" : "s"} sat within edit distance 2 of a
-      popular package; download volume cleared ${suspects.length - actionable.length} of them as
-      unlikely impersonation.
+      ${verdict} ${suspects.length} name${suspects.length === 1 ? "" : "s"} sat within edit distance 2
+      of a popular package.${clearedText}
     </div>`;
 
     container.innerHTML = summary + suspects
       .map((s) => {
         const cls = s.suspicion === "likely coincidence" ? "coincidence" : s.suspicion;
-        const ratio = s.downloadRatio === null ? "n/a" : (s.downloadRatio * 100).toFixed(2) + "%";
+        // A convincing typosquat sits several orders of magnitude below the
+        // package it imitates, so two decimal places round it to a flat
+        // "0.00%" — which reads as missing data rather than as the strongest
+        // signal in the row. Anything below 0.01% is shown as such.
+        const pct = s.downloadRatio === null ? null : s.downloadRatio * 100;
+        const ratio = pct === null ? "n/a" : pct < 0.01 ? "<0.01%" : pct.toFixed(2) + "%";
         return `<div class="suspect">
           <span class="badge ${esc(cls)}">${esc(s.suspicion)}</span>
           <strong>${esc(s.candidate)}</strong> vs <strong>${esc(s.resembles)}</strong> (distance ${esc(s.distance)})<br/>
@@ -326,16 +365,62 @@ async function loadTyposquats() {
   }
 }
 
-function render(data) {
+// How many credential-reachable packages to draw before the outer ring stops
+// being readable. Past this the sidebar list is the better surface, and the
+// count of what was left out is surfaced rather than silently dropped.
+const CRED_DRAW_CAP = 60;
+
+function render(data, attempt = 0) {
   ringsG.innerHTML = "";
   edgesG.innerHTML = "";
   nodesG.innerHTML = "";
 
   const rect = svg.getBoundingClientRect();
+  // The whole layout is derived from the measured box, so rendering before
+  // the SVG has been laid out collapses every node into the top-left corner.
+  // Wait a frame instead of drawing a broken graph — bounded, so a genuinely
+  // hidden panel doesn't spin forever.
+  if ((rect.width < 50 || rect.height < 50) && attempt < 10) {
+    requestAnimationFrame(() => render(data, attempt + 1));
+    return;
+  }
   const cx = rect.width / 2;
   const cy = rect.height / 2;
   const maxHop = Math.max(...data.nodes.map((n) => n.hop));
-  const hops = Math.max(maxHop, 1);
+
+  // Packages reachable ONLY through shared publish rights. These are the
+  // entire thesis of the project — a dependency scanner reports none of them
+  // — so they are drawn, not merely listed in a sidebar. Each is assigned to
+  // exactly one maintainer for *layout* (a package often has several) so the
+  // outer ring groups into readable per-credential arcs; edges are still
+  // drawn from every maintainer that can publish to it.
+  const groups = data.maintainers?.groups ?? [];
+  const missed = new Set(data.maintainers?.missedByDeps ?? []);
+  const reach = new Set(data.maintainers?.reach ?? []);
+  const placed = new Set();
+  const credGroups = [];
+  for (const g of groups) {
+    const packages = [];
+    for (const p of g.packages) {
+      if (!missed.has(p) || placed.has(p)) continue;
+      if (placed.size >= CRED_DRAW_CAP) break;
+      placed.add(p);
+      packages.push(p);
+    }
+    if (packages.length > 0) credGroups.push({ maintainer: g.maintainer, packages });
+  }
+  const credOmitted = missed.size - placed.size;
+  const hasCred = placed.size > 0;
+
+  // Two extra rings sit outside the dependency hops when there is a
+  // credential channel to show: the maintainers, then the packages only they
+  // can reach. The spread is adaptive — reserving two full rings for a lone
+  // credential package would shrink the dependency graph to a knot in the
+  // middle to make room for one dot.
+  const credSpread = placed.size >= 3 ? 2 : 1.2;
+  const maintainerLevel = maxHop + credSpread / 2;
+  const credLevel = maxHop + credSpread;
+  const hops = Math.max(hasCred ? credLevel : maxHop, 1);
 
   // Rings are elliptical, sized independently on each axis. Sizing both from
   // Math.min(width, height) squandered the panel's spare width (~370px on a
@@ -375,10 +460,83 @@ function render(data) {
     });
   }
 
+  // Lay out the credential channel: maintainers on one ring, the packages
+  // only they can reach on the ring outside it, grouped so each maintainer
+  // sits at the centre of its own arc.
+  const credPos = new Map();
+  const mpos = new Map();
+  if (hasCred) {
+    const rxM = maintainerLevel * ringX, ryM = maintainerLevel * ringY;
+    const rxC = credLevel * ringX, ryC = credLevel * ringY;
+    // Guide rings only earn their ink once there are enough nodes on them to
+    // read as a ring; one lone package makes them look like empty scaffolding.
+    if (placed.size >= 3) {
+      ringsG.appendChild(el("ellipse", { class: "ring", cx, cy, rx: rxM, ry: ryM }));
+      ringsG.appendChild(el("ellipse", { class: "ring", cx, cy, rx: rxC, ry: ryC }));
+    }
+
+    const startAngle = -Math.PI / 2 + credLevel * 0.4;
+    let i = 0;
+    for (const g of credGroups) {
+      for (const p of g.packages) {
+        const angle = (2 * Math.PI * i) / placed.size + startAngle;
+        credPos.set(p, { x: cx + rxC * Math.cos(angle), y: cy + ryC * Math.sin(angle), angle });
+        i++;
+      }
+    }
+
+    // Place EVERY maintainer that can publish to a drawn package, not just
+    // the ones that own an arc — co-maintainers are independent ways in and
+    // dropping them would under-draw the real exposure. Each sits at the
+    // mean angle of its own packages; the radial stagger keeps two
+    // maintainers of the same package set from landing on top of each other.
+    let mi = 0;
+    for (const g of groups) {
+      const angles = g.packages.map((p) => credPos.get(p)?.angle).filter((a) => a !== undefined);
+      if (angles.length === 0) continue;
+      const mid = Math.atan2(
+        angles.reduce((s, a) => s + Math.sin(a), 0) / angles.length,
+        angles.reduce((s, a) => s + Math.cos(a), 0) / angles.length
+      );
+      const stagger = 1 + (mi % 3) * 0.07;
+      mi++;
+      mpos.set(g.maintainer, {
+        x: cx + rxM * stagger * Math.cos(mid),
+        y: cy + ryM * stagger * Math.sin(mid),
+        angle: mid,
+      });
+    }
+  }
+
   // Keep handles on the rendered elements so a click can highlight an actual
   // path through them without re-rendering the whole graph.
   edgeEls.clear();
   nodeEls.clear();
+  credEdgeEls.clear();
+  maintainerEls.clear();
+
+  // Credential edges are drawn first so the dependency graph and every node
+  // paints on top of them.
+  if (hasCred) {
+    const t = pos.get(data.target);
+    for (const g of groups) {
+      const mp = mpos.get(g.maintainer);
+      if (!mp || !t) continue;
+      const spoke = el("line", { class: "edge-cred", x1: t.x, y1: t.y, x2: mp.x, y2: mp.y });
+      edgesG.appendChild(spoke);
+      credEdgeEls.set(`t|${g.maintainer}`, spoke);
+      // Every package this maintainer can publish to, including ones laid
+      // out under a different maintainer's arc — that overlap is real and
+      // worth seeing.
+      for (const p of g.packages) {
+        const pp = credPos.get(p);
+        if (!pp) continue;
+        const line = el("line", { class: "edge-cred", x1: mp.x, y1: mp.y, x2: pp.x, y2: pp.y });
+        edgesG.appendChild(line);
+        credEdgeEls.set(`${g.maintainer}|${p}`, line);
+      }
+    }
+  }
 
   for (const e of data.edges) {
     const a = pos.get(e.from);
@@ -394,6 +552,10 @@ function render(data) {
     const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
     const radius = n.hop === 0 ? 10 : 6;
     g.appendChild(el("circle", { r: radius, fill: hopColor(n.hop) }));
+    // Exposed twice over: in the dependency tree AND in credential range.
+    if (n.hop > 0 && reach.has(n.name)) {
+      g.appendChild(el("circle", { class: "cred-halo", r: radius + 4 }));
+    }
 
     // Labels sit outward along each node's own radius rather than all being
     // centred above their node. On a ring, centred labels collide as soon as
@@ -424,6 +586,64 @@ function render(data) {
     nodeEls.set(n.name, g);
     nodesG.appendChild(g);
   }
+
+  // Maintainers. Drawn as squares because they are a genuinely different
+  // vertex type in the graph, not another package — shape carries that, so
+  // colour stays free to mean "how exposed".
+  for (const [name, p] of mpos) {
+    const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
+    g.appendChild(el("rect", { x: -5, y: -5, width: 10, height: 10, fill: "var(--maintainer)" }));
+    const dirX = Math.cos(p.angle);
+    const label = el("text", {
+      x: dirX * 11,
+      y: Math.sin(p.angle) * 11,
+      "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+      "dominant-baseline": Math.sin(p.angle) > 0.4 ? "hanging" : Math.sin(p.angle) < -0.4 ? "auto" : "middle",
+      fill: "var(--maintainer)",
+    });
+    label.textContent = name;
+    g.appendChild(label);
+    const title = el("title", {});
+    title.textContent = `${name} — can publish to ${data.target} and others; click to highlight`;
+    g.appendChild(title);
+    g.addEventListener("click", () => showMaintainer(name));
+    maintainerEls.set(name, g);
+    nodesG.appendChild(g);
+  }
+
+  // Packages reachable only through those credentials. Labels are suppressed
+  // on a crowded ring — at this count the mass IS the message, and every
+  // name is one hover or click away.
+  const labelCred = placed.size <= 14;
+  for (const [name, p] of credPos) {
+    const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
+    g.appendChild(el("circle", { r: 5, fill: "var(--danger)" }));
+    if (labelCred) {
+      const dirX = Math.cos(p.angle);
+      const label = el("text", {
+        x: dirX * 10,
+        y: Math.sin(p.angle) * 10,
+        "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+        "dominant-baseline": Math.sin(p.angle) > 0.4 ? "hanging" : Math.sin(p.angle) < -0.4 ? "auto" : "middle",
+      });
+      label.textContent = name;
+      g.appendChild(label);
+    }
+    const title = el("title", {});
+    title.textContent = `${name} — no dependency path; reachable via shared publish rights. Click to trace.`;
+    g.appendChild(title);
+    g.addEventListener("click", () => showPath(name));
+    nodeEls.set(name, g);
+    nodesG.appendChild(g);
+  }
+
+  // Truncation is never silent: a partial picture of a blast radius is the
+  // one failure mode this tool cannot afford.
+  if (credOmitted > 0) {
+    const note = el("text", { x: 12, y: rect.height - 12, fill: "var(--muted)", "font-size": "11" });
+    note.textContent = `+${credOmitted} more credential-reachable package(s) not drawn — see sidebar`;
+    nodesG.appendChild(note);
+  }
 }
 
 // --- path tracing ------------------------------------------------------
@@ -432,7 +652,9 @@ function render(data) {
 // already carries every DEPENDS_ON edge among the exposed set, so the exact
 // path is recoverable client-side with a BFS — no extra HydraDB query.
 const edgeEls = new Map(); // "from to" -> <line>
-const nodeEls = new Map(); // name -> <g>
+const nodeEls = new Map(); // package name -> <g>
+const credEdgeEls = new Map(); // "t|maintainer" or "maintainer|package" -> <line>
+const maintainerEls = new Map(); // maintainer name -> <g>
 
 // Shortest chain of DEPENDS_ON edges from `to` back to the target, i.e. the
 // concrete reason `to` is exposed. Edges point dependent -> dependency, so
@@ -465,6 +687,32 @@ function findPath(edges, target, to) {
 function clearHighlight() {
   for (const line of edgeEls.values()) line.classList.remove("edge-hot");
   for (const g of nodeEls.values()) g.classList.remove("node-hot");
+  for (const line of credEdgeEls.values()) line.classList.remove("edge-hot");
+  for (const g of maintainerEls.values()) g.classList.remove("node-hot");
+}
+
+// Clicking a maintainer lights up everything that credential can publish to.
+// This is the "one stolen token, this much reach" view.
+function showMaintainer(name) {
+  clearHighlight();
+  const box = document.getElementById("path-result");
+  const group = (lastData?.maintainers?.groups ?? []).find((g) => g.maintainer === name);
+  if (!group) return;
+
+  maintainerEls.get(name)?.classList.add("node-hot");
+  nodeEls.get(lastData.target)?.classList.add("node-hot");
+  credEdgeEls.get(`t|${name}`)?.classList.add("edge-hot");
+  for (const p of group.packages) {
+    credEdgeEls.get(`${name}|${p}`)?.classList.add("edge-hot");
+    nodeEls.get(p)?.classList.add("node-hot");
+  }
+
+  box.innerHTML = `<strong>${esc(name)}</strong> holds publish rights to
+    <strong>${group.packages.length}</strong> package${group.packages.length === 1 ? "" : "s"}
+    besides <strong>${esc(lastData.target)}</strong>.
+    <div style="margin-top:6px;color:var(--muted);font-size:12px">One compromised
+    credential for this account reaches every highlighted node — with no dependency
+    edge involved.</div>`;
 }
 
 function showPath(name) {
@@ -476,17 +724,28 @@ function showPath(name) {
   if (!path || path.length < 2) {
     // Reachable only through shared publish rights: no dependency edge
     // explains it, which is exactly the finding worth surfacing.
-    const viaMaintainer = (lastData.maintainers?.groups ?? []).find((g) =>
-      g.packages.includes(name)
-    );
-    if (viaMaintainer) {
+    // Every maintainer who can publish to it, not just the first — shared
+    // ownership is common and each one is an independent way in.
+    const via = (lastData.maintainers?.groups ?? []).filter((g) => g.packages.includes(name));
+    if (via.length > 0) {
       nodeEls.get(lastData.target)?.classList.add("node-hot");
+      nodeEls.get(name)?.classList.add("node-hot");
+      for (const g of via) {
+        maintainerEls.get(g.maintainer)?.classList.add("node-hot");
+        credEdgeEls.get(`t|${g.maintainer}`)?.classList.add("edge-hot");
+        credEdgeEls.get(`${g.maintainer}|${name}`)?.classList.add("edge-hot");
+      }
+      const chains = via
+        .map(
+          (g) => `<div style="margin-top:4px;color:var(--muted)">${esc(lastData.target)}
+            &nbsp;&rarr;&nbsp; <span style="color:var(--maintainer)">${esc(g.maintainer)}</span>
+            &nbsp;&rarr;&nbsp; ${esc(name)}</div>`
+        )
+        .join("");
       box.innerHTML = `<strong>${esc(name)}</strong> is <em>not</em> reachable through any
-        dependency edge. It is exposed because
-        <strong>${esc(viaMaintainer.maintainer)}</strong> can publish to both it and
-        <strong>${esc(lastData.target)}</strong>.
-        <div style="margin-top:6px;color:var(--muted)">${esc(lastData.target)}
-        &nbsp;&rarr;&nbsp; ${esc(viaMaintainer.maintainer)} &nbsp;&rarr;&nbsp; ${esc(name)}</div>`;
+        dependency edge — a dependency scanner reports it as unaffected. It is exposed
+        because ${via.length === 1 ? "this credential can" : `these ${via.length} credentials can each`}
+        publish to both it and <strong>${esc(lastData.target)}</strong>.${chains}`;
     } else {
       box.innerHTML = `<span style="color:var(--muted)">${esc(name)} is the target.</span>`;
       nodeEls.get(name)?.classList.add("node-hot");
@@ -548,6 +807,28 @@ function renderMaintainers(data) {
   box.innerHTML = headline + groups;
 }
 
+// How the exposure question was actually answered. Worth stating on screen:
+// the native procedure returns the exposed set, the hop distances and the
+// edges in one round trip, where the portable fallback has to go back and ask
+// for the last two. The fallback exists because HydraDB is a moving target —
+// against a build without the procedure the demo still works, just chattier.
+function engineNote(data) {
+  if (data.engine === "algo.SSpaths") {
+    return `<strong>${data.coreQueryMs}ms</strong> &mdash; one
+      <code>algo.SSpaths</code> call. HydraDB's native single-source path
+      procedure returns the exposed set, every hop distance and every edge
+      between them together, so drawing this took
+      <strong>${data.queryCount}</strong> query.<br/>
+      <span style="color:var(--muted)">${data.totalMs}ms total, including the
+      separate publish-rights traversal.</span>`;
+  }
+  return `<strong>${data.coreQueryMs}ms</strong> &mdash; single HydraDB
+    traversal answering the exposure question.<br/>
+    <span style="color:var(--muted)">${data.totalMs}ms total for
+    ${data.queryCount} queries, including the hop-distance and edge lookups
+    used only to draw the graph.</span>`;
+}
+
 async function computeBlastRadius() {
   const name = pkgInput.value.trim();
   const depth = Number(depthInput.value) || 6;
@@ -584,11 +865,7 @@ async function computeBlastRadius() {
       </div>
       <span style="color:var(--muted)">A dependency-only scanner reports
       <strong style="color:var(--text)">${exposedCount}</strong>.</span><br/><br/>
-      <strong>${data.coreQueryMs}ms</strong> &mdash; single HydraDB traversal
-      answering the exposure question.<br/>
-      <span style="color:var(--muted)">${data.totalMs}ms total for
-      ${data.queryCount} queries, including the hop-distance and edge lookups
-      used only to draw the graph.</span>`;
+      ${engineNote(data)}`;
 
     renderMaintainers(data);
     statusEl.textContent = "";
@@ -604,8 +881,54 @@ async function computeBlastRadius() {
 goBtn.addEventListener("click", computeBlastRadius);
 pkgInput.addEventListener("keydown", (e) => { if (e.key === "Enter") computeBlastRadius(); });
 
+// The layout is derived from the SVG's measured size, so any change to that
+// box leaves the drawing stale — nodes clipped, or bunched into a corner if
+// the graph was drawn while layout was still settling. A ResizeObserver
+// catches both cases (window resize AND the initial settle) where a plain
+// resize listener only catches the first. Re-rendering replays the response
+// already in hand, so it costs no query. render() cannot change the box it
+// observes — the SVG is sized by its flex parent, not by its content — so
+// this cannot feed back on itself.
+// Re-lay-out whenever the drawing area changes size. Two triggers on
+// purpose: `resize` covers the ordinary case of someone resizing the window,
+// and the observer additionally catches the panel changing size while the
+// window does not. The observer is held in a variable deliberately — a
+// ResizeObserver does not keep itself alive, so
+// `new ResizeObserver(...).observe(x)` can be collected mid-session and
+// silently stop firing. Re-rendering replays the response already in hand,
+// so it costs no query, and render() cannot change the box it observes (the
+// SVG is sized by its flex parent, not its content) so this cannot loop.
+let resizeTimer = null;
+function scheduleRelayout() {
+  if (!lastData) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => render(lastData), 120);
+}
+window.addEventListener("resize", scheduleRelayout);
+const graphResizeObserver = new ResizeObserver(scheduleRelayout);
+graphResizeObserver.observe(document.getElementById("svg-wrap"));
+
 loadPackageList();
 loadTyposquats();
+
+// Deep links, so a specific finding is a URL rather than a list of steps:
+//   ?pkg=body-parser&maintainer=dougwilson   one credential's whole reach
+//   ?pkg=debug&trace=serve-static            the chain that exposes a package
+// Useful for demos and for citing a concrete result somewhere else.
+const params = new URLSearchParams(location.search);
+const initialPkg = params.get("pkg");
+if (initialPkg) {
+  pkgInput.value = initialPkg;
+  const depthParam = params.get("depth");
+  if (depthParam) depthInput.value = depthParam;
+  computeBlastRadius().then(() => {
+    if (!lastData) return; // the lookup failed; the error is already on screen
+    const maintainer = params.get("maintainer");
+    const trace = params.get("trace");
+    if (maintainer) showMaintainer(maintainer);
+    else if (trace) showPath(trace);
+  });
+}
 </script>
 </body>
 </html>

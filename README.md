@@ -23,17 +23,44 @@ The gap is not academic. On the demo graph:
 
 `body-parser` looks nearly harmless through a dependency lens — **1** exposed package. Widen to publish rights and **36** packages are in range of the same credentials, **35 of them invisible to dependency scanning entirely**. The UI leads with the union for exactly this reason, and shows the per-channel split underneath so the number stays honest.
 
+![One maintainer's publish reach from body-parser](docs/credential-reach.png)
+
+*Clicking the maintainer `dougwilson` lights up everything one stolen credential reaches. The small orange core is the entire dependency blast radius; every other node is invisible to a dependency scanner. Both channels are drawn — squares are maintainers, dashed edges are publish rights.*
+
 **Why a graph database rather than a table or a vector index.** The dependency answer is a transitive closure of unbounded depth — a self-join repeated until fixpoint in SQL, one traversal here. The publish-rights answer is a two-hop walk *across two different edge types* (`MAINTAINED_BY` then `MAINTAINS`). Neither is a similarity question, so an embedding index cannot answer either one: "which packages are semantically similar to `qs`" is not "which packages break when `qs` breaks."
 
-**Engaging with the engine's real limits.** Three constraints were found by direct testing against the running node, and each one visibly shaped the design rather than being worked around silently:
+**The whole picture is one query.** The exposed set, every package's hop distance, and every edge between them all come back from a single call to HydraDB's native single-source path procedure:
+
+```cypher
+CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], maxLen: 6, pathCount: 2000})
+YIELD path RETURN path
+```
+
+Because it returns *paths* rather than endpoints, one round trip carries everything a fan-out implementation has to go back and ask for — the endpoint of each path is an exposed package, its length is the hop distance, and its relationships are the edges. `src/blastRadius.js` keeps the portable variable-length-`MATCH` version as `blastRadiusFanout()` and falls back to it automatically if the procedure is unavailable or hits its path cap, so the demo still runs against a build without it. The two produce **identical node sets, edge sets and hop distances** on every package in the demo graph — verified, not assumed:
+
+| Target | Native | Fan-out fallback | End-to-end speedup |
+|---|---|---|---|
+| `debug` | **1 query** | 10 queries | **29x** |
+| `qs` | **1 query** | 5 queries | **13x** |
+| `send` | **1 query** | 5 queries | **16x** |
+| `body-parser` | **1 query** | 4 queries | **15x** |
+
+Calling it at all took some finding, and both discoveries are the kind that cost an afternoon:
+
+- The request field is **`parameters`**, not `params`. A field named `params` is accepted by the transport and silently ignored, so the server answers `missing OpenCypher query parameter $sourceNode` while the parameter is sitting in the request body.
+- **Only scalars bind.** `sourceNode` *must* be a bound parameter and `relTypes` *must not* be — a list parameter is rejected with `composite parameter is only supported as an UNWIND input`.
+
+**Engaging with the engine's real limits.** Three further constraints were found the same way, and each one visibly shaped the design rather than being worked around silently:
 
 - Variable-length `MATCH` only expands **forward from a fixed source id**, so "who depends on X" is impossible as a reverse query. A mirrored `REQUIRED_BY` edge is written at ingest time so the question becomes a forward traversal. ([why](#why-the-mirrored-edge))
 - Vertex identity is the integer `id` **alone — labels do not scope it**, and they accumulate. Hashing maintainer names in the same space as package names would have silently fused maintainer `ljharb` with a package named `ljharb`. Ids are namespaced per type. ([why](#why-vertex-ids-are-hashed-and-namespaced))
 - A relationship pattern may name **exactly one type** — `[:REQUIRED_BY|MAINTAINS*1..3]` is rejected outright. So the two channels genuinely cannot be walked in one traversal; they are queried separately and unioned in `src/server.js`. That is a design consequence, not a shortcut.
 
-**Proof it's correct, not just fast.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. ([details](#correctness-eval))
+**Proof the traversal is correct.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. This is a correctness gate on the ingest → store → traverse round trip, not a vulnerability-detection accuracy score — the distinction matters and is spelled out in [the eval section](#correctness-eval).
 
-**And the graph shows its work.** Click any node and the exact chain that exposes it lights up — `debug → send → serve-static` — reconstructed from the edges the traversal already returned. For a package reachable only through credentials, it says so explicitly and names the maintainer who connects them. Membership is the weak claim; the path is the evidence.
+**And the graph shows its work.** Click any node and the exact chain that exposes it lights up, reconstructed from the edges the traversal already returned — clicking `serve-static` on a `debug` blast radius traces `serve-static → send → debug`, each package depending on the next. Click a package reachable only through credentials and it says so explicitly, naming every maintainer who can publish to both it and the target. Click a maintainer and its entire publish reach lights up at once. Membership is the weak claim; the path is the evidence.
+
+![Tracing the dependency chain that exposes serve-static](docs/traced-path.png)
 
 ## Quick start
 
@@ -60,6 +87,8 @@ Working end-to-end, including the demo UI. Of the six questions the track brief 
 | Which version introduced the vulnerability? | ❌ graph is version-less today |
 | Which apps resolved the bad version while live? | ❌ needs lockfile ingestion |
 
+The two gaps share one cause and one fix: the graph models packages, not versions. Adding `(:Package)-[:HAS_VERSION]->(:Version)` and ingesting lockfiles would answer both, and it is the obvious next edge type. That was a deliberate trade — the second *attack channel* (publish rights) was worth more than a second *dimension* on the channel already modelled, because the incident the brief opens with spread through credentials, and no amount of version resolution would have caught it.
+
 Plus a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories) and a zero-dependency API + browser visualization (`node src/server.js`, then `http://127.0.0.1:8787`).
 
 ### Running the demo UI
@@ -70,9 +99,20 @@ node src/server.js --port=8787
 
 Then open `http://127.0.0.1:8787`, type a package name that's already in the graph (the input autocompletes from `/api/packages`), and click "Compute blast radius". Try `body-parser`, `qs`, or `debug`.
 
-**Then click a node.** The graph traces the exact chain that exposes it — for `debug`, clicking `serve-static` lights up `debug → send → serve-static` and spells the path out in the sidebar. Clicking a package that's only reachable through shared credentials says so, and names the maintainer who links them. The path is reconstructed from the edges the blast-radius query already returned, so tracing costs no additional query.
+**Both attack channels are drawn in one picture.** Circles are packages, coloured by hop distance; squares are maintainers — a different shape because they are a genuinely different vertex type in the graph. Solid arrows are dependency edges; dashed red edges are publish rights. Packages sitting on the outermost ring in red are reachable *only* through credentials: a dependency scanner reports none of them. A package already in the dependency tree that is *also* in credential range gets a dashed halo, because it is exposed twice over.
 
-**Demo-ready example:** `./setup.sh` ingests `express --depth=4 --max-nodes=250` and `webpack --depth=3 --max-nodes=150` into one graph — **119 real packages**, including [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed, via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
+**Then click something.** Clicking a package traces the exact chain that exposes it — clicking `serve-static` on a `debug` radius lights up `serve-static → send → debug` and spells it out in the sidebar. Clicking a credential-only package says so explicitly and names every maintainer who can publish to both it and the target. Clicking a maintainer lights up its entire publish reach at once. All of it is reconstructed from data the blast-radius response already carried, so every interaction costs zero additional queries.
+
+**Demo-ready example:** `./setup.sh` ingests `express --depth=4 --max-nodes=250` and `webpack --depth=3 --max-nodes=150` into one graph — **120 real packages**, including [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed, via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
+
+It also ingests `expres` — a real package someone published to npm, a genuine typosquat of `express` with ~6k weekly downloads against express's ~127M — so the typosquat scanner has an actual positive to find rather than an empty result. Nothing about it is synthetic; it is a squatted name that really exists.
+
+**Deep links.** Any view is addressable, which makes a specific finding quotable rather than a list of steps to reproduce:
+
+```
+http://127.0.0.1:8787/?pkg=body-parser&maintainer=dougwilson   one credential's whole reach
+http://127.0.0.1:8787/?pkg=debug&trace=serve-static            the chain that exposes a package
+```
 
 ### The second attack path: shared publish rights
 
@@ -89,15 +129,7 @@ MATCH (target:Package {id: <id>})-[:MAINTAINED_BY]->(m:Maintainer)-[:MAINTAINS]-
 RETURN m.name, sibling.name
 ```
 
-The gap between the two answers is the point. On the `express` graph:
-
-| Package | Exposed via dependencies | Reachable via shared publish rights | **Missed by dependencies alone** |
-|---|---|---|---|
-| `qs` | 2 | 8 | **8** |
-| `debug` | 6 | 1 | **1** |
-| `body-parser` | 1 | 36 | **35** |
-
-`body-parser` looks almost harmless through a dependency lens — one exposed package. Widen to publish rights and 35 further packages come into range of the same credentials. The UI reports both side by side for exactly this reason.
+The gap between the two answers is the point, and it is measured at the top of this README: `body-parser` exposes **1** package through dependencies and **36** through publish rights — **35** of them reachable by no dependency edge at all.
 
 > Note: this models *blast radius*, not wrongdoing. These are the legitimate maintainers of widely-used packages; the point is that their credentials are a high-value target, which is what makes the exposure worth measuring.
 
@@ -109,26 +141,42 @@ node src/eval.js koa --depth=3 --max-nodes=200
 
 The track brief scores on precision, recall, query latency and cost against OSV / GitHub Advisory ground truth. Since the organizers' held-out harness isn't available to entrants, `src/eval.js` builds the strongest self-check available: it crawls a dependency tree, computes the blast radius **independently** by BFS over the raw edge list in memory (no HydraDB involved), then asks HydraDB's `REQUIRED_BY` traversal the same question and compares the two sets — reporting precision, recall, F1 and per-query latency, with each target cross-referenced against its real OSV advisory count.
 
-The two methods should agree exactly; they currently do, at **1.00 precision and 1.00 recall** on every target, with traversals answering in 12–43ms:
+The two methods should agree exactly; they currently do, at **1.00 precision and 1.00 recall** on every target, with traversals answering in 8–44ms:
 
 ```
 target               truth   hydra   P      R      F1     ms     OSV advisories
-mime-types           3       3       1.00   1.00   1.00   43     0
-statuses             3       3       1.00   1.00   1.00   15     0
-http-errors          2       2       1.00   1.00   1.00   12     0
-content-type         2       2       1.00   1.00   1.00   13     0
-depd                 4       4       1.00   1.00   1.00   14     0
+fresh                1       1       1.00   1.00   1.00   44     1
+negotiator           2       2       1.00   1.00   1.00   9      1
+mime-types           3       3       1.00   1.00   1.00   9      0
+statuses             3       3       1.00   1.00   1.00   9      0
+http-errors          2       2       1.00   1.00   1.00   8      0
 ```
+
+Targets are chosen to make the table say something. Ranking purely by in-degree picks the biggest blast radii, but the most-depended-upon packages in a typical npm tree are stable low-level utilities that have never had an advisory — which made the OSV column print all zeros on every run and look like a dead integration. So a wider slice is ranked by in-degree, packages carrying real advisories are preferred, and the rest is backfilled by in-degree.
+
+**What this proves, and what it does not.** It is a correctness gate on the ingest → store → traverse round trip: it answers *"does HydraDB return exactly the set that is actually reachable in the graph we wrote."* It is **not** a measure of vulnerability-detection accuracy against OSV/GHSA. The ground truth is a BFS over the same edge list that was just written, so the score can only drop if ingestion or traversal is broken — which makes it a strong regression test and a deliberately weak accuracy claim. Measuring true detection accuracy needs the organizers' held-out advisory set, which entrants don't have.
 
 Run it against a **freshly reset** database: HydraDB accumulates everything previously ingested (correct behavior for a real ecosystem graph — more history means more complete answers), but the in-memory ground truth only knows the current crawl, so extra correct matches from earlier ingests would read as false precision loss.
 
 ### On the latency numbers
 
-The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the single variable-length traversal that actually answers "what is exposed" — typically 12–60ms, and the only number that should be read as HydraDB's query speed. **`totalMs`** additionally covers the hop-distance probes and per-package edge lookups that exist *only to draw the radial graph*; those are fanned out concurrently and adaptively (probing stops as soon as every exposed package has a hop assigned), but they are presentation cost, not query cost, and are labelled as such rather than folded into a single flattering number.
+The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the single `algo.SSpaths` call that answers "what is exposed" and returns the shape needed to draw it — typically 4–6ms warm, and the only number that should be read as HydraDB's query speed. **`totalMs`** additionally covers the existence check and the separate publish-rights traversal, which is a genuinely different question against a different edge type. The UI also names which engine path answered, because that is not cosmetic: on the fallback, `coreQueryMs` covers only the first of several queries and `totalMs` also absorbs hop-distance probes and per-package edge lookups that exist *only to draw the graph*. Those were never folded into a single flattering number, and now that the native procedure removes them entirely, the honest comparison is still on the record above.
 
 ### Typosquat detection
 
-`node src/typosquat.js` scans every package name currently in the graph, flags anything within edit distance 2 of a popular reference package (`src/typosquat.js`'s `POPULAR_PACKAGES`), and confirms suspicion using live npm weekly download counts — a genuine typosquat has far fewer downloads than the package it resembles. This is deliberately two-signal: edit distance alone produces false positives (e.g. `isarray` is a real, independently popular package one edit from `is-array`, with *more* downloads — the download ratio correctly reclassifies this as "likely coincidence" rather than flagging it).
+`node src/typosquat.js` scans every package name currently in the graph, flags anything within edit distance 2 of a popular reference package (`src/typosquat.js`'s `POPULAR_PACKAGES`), and confirms suspicion using live npm weekly download counts — a genuine typosquat has far fewer downloads than the package it resembles. On the demo graph:
+
+```
+[HIGH] "expres" (distance 1 from "express") — 6,186 weekly downloads vs 127,296,948
+       for "express" (0.005% of "express"'s downloads)
+```
+
+This is deliberately two-signal, because each signal alone is wrong in a different way:
+
+- **Edit distance alone over-reports.** `isarray` is a real, independently popular package one edit from `is-array` — and has *more* downloads than it. The ratio reclassifies it as "likely coincidence" instead of flagging it.
+- **Absolute distance is meaningless on short names.** `ms` is one edit from `qs`, and `acorn` is two from `cors`; neither has anything to do with impersonation. Distance must also be small *relative* to name length (≤ 0.34), which drops both while keeping `expres`/`express` and `reqeusts`/`request`.
+
+The panel leads with the verdict rather than the raw candidate list, since the count that matters is how many survived both filters.
 
 ## How HydraDB is used
 
@@ -139,14 +187,23 @@ The graph has two vertex types and four edge types:
 - `(package)-[:MAINTAINED_BY]->(maintainer:Maintainer)` — publish rights
 - `(maintainer)-[:MAINTAINS]->(package)` — the reverse, likewise
 
-The blast-radius query is a variable-length forward traversal over `REQUIRED_BY` starting from the compromised package:
+The blast-radius question is asked two ways against the same model, and both are forward walks over `REQUIRED_BY` from the compromised package.
+
+The primary path is HydraDB's native single-source path procedure, which returns whole paths and so answers the exposure question and supplies the drawing in one round trip:
+
+```cypher
+CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], maxLen: 6, pathCount: 2000})
+YIELD path RETURN path
+```
+
+The portable fallback is a variable-length traversal, used when the procedure is unavailable or its path cap is reached:
 
 ```cypher
 MATCH (target:Package {id: <id>})-[:REQUIRED_BY*1..6]->(dependent:Package)
 RETURN DISTINCT dependent.name
 ```
 
-This is the core "why HydraDB" of the project: computing everything transitively exposed by a compromise is a multi-hop graph traversal, not something a vector index or a flat table can answer.
+This is the core "why HydraDB" of the project: computing everything transitively exposed by a compromise is a multi-hop graph traversal, not something a vector index or a flat table can answer — and the engine has a purpose-built procedure for exactly that traversal, which is why the answer costs one query rather than ten.
 
 ### Why vertex ids are hashed and namespaced
 
