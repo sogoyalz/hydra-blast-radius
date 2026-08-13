@@ -110,14 +110,33 @@ async function handleApi(req, res, url) {
     // dependency blast radius because the two answers can differ wildly —
     // and the gap is the whole point.
     const { groups, reach } = await sharedMaintainerReach(name);
-    const exposedByDeps = new Set(result.nodes.map((n) => n.name));
-    const missedByDeps = reach.filter((p) => !exposedByDeps.has(p));
+    const exposedByDeps = new Set(result.nodes.filter((n) => n.hop > 0).map((n) => n.name));
+    const reachSet = new Set(reach);
+    reachSet.delete(name); // a package is not its own blast radius
+    const missedByDeps = [...reachSet].filter((p) => !exposedByDeps.has(p));
+
+    // The two channels are traversed separately because HydraDB's query
+    // engine rejects mixing relationship types in one variable-length
+    // pattern ("relationship pattern must have exactly one type"). Combining
+    // them here is the point: a compromise spreads through code you pull in
+    // AND through credentials that can push code to you, and only the union
+    // is the honest answer. Set arithmetic over results already fetched — no
+    // extra queries, so this costs nothing against the latency figures.
+    const viaBoth = [...exposedByDeps].filter((p) => reachSet.has(p));
+    const viaDependencyOnly = [...exposedByDeps].filter((p) => !reachSet.has(p));
+    const unified = new Set([...exposedByDeps, ...reachSet]);
 
     // coreQueryMs (the traversal that answers the question) is reported
     // separately from totalMs (which also covers laying out the picture).
     return sendJson(res, 200, {
       ...result,
       maintainers: { groups, reach, missedByDeps },
+      unifiedExposure: {
+        total: unified.size,
+        viaDependencyOnly: viaDependencyOnly.length,
+        viaMaintainerOnly: missedByDeps.length,
+        viaBoth: viaBoth.length,
+      },
       totalMs: Date.now() - start,
     });
   }

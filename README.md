@@ -4,6 +4,37 @@ Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as
 
 **The question:** if an npm package is compromised right now, what's exposed? This project builds the npm dependency graph in [HydraDB](https://github.com/hydra-db/hydradb) and answers that with a graph traversal — not a guess, not a vector search.
 
+## Why this is a graph problem, and what HydraDB does here
+
+A compromise spreads two ways, and they are different relationships in the graph:
+
+1. **Through code you pull in** — the dependency tree. `(dependent)-[:DEPENDS_ON]->(dependency)`.
+2. **Through credentials that can push code to you** — shared publish rights. `(package)-[:MAINTAINED_BY]->(maintainer)`.
+
+Scanners model the first. The incident the track brief opens with was the second: the TanStack worm published 84 malicious artifacts across 42 packages in six minutes through compromised *publish access*, and those packages did not depend on each other. Modelling both as first-class edges and reporting their union is the core idea here.
+
+The gap is not academic. On the demo graph:
+
+| Package | Exposed via dependencies | Reachable via shared publish rights | **Total blast radius (union)** |
+|---|---|---|---|
+| `body-parser` | 1 | 36 | **36** |
+| `qs` | 2 | 8 | **10** |
+| `debug` | 6 | 1 | **7** |
+
+`body-parser` looks nearly harmless through a dependency lens — **1** exposed package. Widen to publish rights and **36** packages are in range of the same credentials, **35 of them invisible to dependency scanning entirely**. The UI leads with the union for exactly this reason, and shows the per-channel split underneath so the number stays honest.
+
+**Why a graph database rather than a table or a vector index.** The dependency answer is a transitive closure of unbounded depth — a self-join repeated until fixpoint in SQL, one traversal here. The publish-rights answer is a two-hop walk *across two different edge types* (`MAINTAINED_BY` then `MAINTAINS`). Neither is a similarity question, so an embedding index cannot answer either one: "which packages are semantically similar to `qs`" is not "which packages break when `qs` breaks."
+
+**Engaging with the engine's real limits.** Three constraints were found by direct testing against the running node, and each one visibly shaped the design rather than being worked around silently:
+
+- Variable-length `MATCH` only expands **forward from a fixed source id**, so "who depends on X" is impossible as a reverse query. A mirrored `REQUIRED_BY` edge is written at ingest time so the question becomes a forward traversal. ([why](#why-the-mirrored-edge))
+- Vertex identity is the integer `id` **alone — labels do not scope it**, and they accumulate. Hashing maintainer names in the same space as package names would have silently fused maintainer `ljharb` with a package named `ljharb`. Ids are namespaced per type. ([why](#why-vertex-ids-are-hashed-and-namespaced))
+- A relationship pattern may name **exactly one type** — `[:REQUIRED_BY|MAINTAINS*1..3]` is rejected outright. So the two channels genuinely cannot be walked in one traversal; they are queried separately and unioned in `src/server.js`. That is a design consequence, not a shortcut.
+
+**Proof it's correct, not just fast.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. ([details](#correctness-eval))
+
+**And the graph shows its work.** Click any node and the exact chain that exposes it lights up — `debug → send → serve-static` — reconstructed from the edges the traversal already returned. For a package reachable only through credentials, it says so explicitly and names the maintainer who connects them. Membership is the weak claim; the path is the evidence.
+
 ## Quick start
 
 ```bash
@@ -37,6 +68,8 @@ node src/server.js --port=8787
 
 Then open `http://127.0.0.1:8787`, type a package name that's already in the graph (the input autocompletes from `/api/packages`), and click "Compute blast radius". Try `body-parser`, `qs`, or `debug`.
 
+**Then click a node.** The graph traces the exact chain that exposes it — for `debug`, clicking `serve-static` lights up `debug → send → serve-static` and spells the path out in the sidebar. Clicking a package that's only reachable through shared credentials says so, and names the maintainer who links them. The path is reconstructed from the edges the blast-radius query already returned, so tracing costs no additional query.
+
 **Demo-ready example:** `./setup.sh` ingests `express --depth=4 --max-nodes=250` and `webpack --depth=3 --max-nodes=150` into one graph — **119 real packages**, including [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed, via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
 
 ### The second attack path: shared publish rights
@@ -58,7 +91,7 @@ The gap between the two answers is the point. On the `express` graph:
 
 | Package | Exposed via dependencies | Reachable via shared publish rights | **Missed by dependencies alone** |
 |---|---|---|---|
-| `qs` | 2 | 3 | **3** |
+| `qs` | 2 | 8 | **8** |
 | `debug` | 6 | 1 | **1** |
 | `body-parser` | 1 | 36 | **35** |
 

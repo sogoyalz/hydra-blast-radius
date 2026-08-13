@@ -114,3 +114,13 @@ export function maintainerId(name) {
   return packageId(`npm-maintainer ${name}`);
 }
 
+// One further engine constraint, found the same way and worth stating because
+// it shapes the API: a variable-length pattern may name only ONE relationship
+// type. `[:REQUIRED_BY|MAINTAINS*1..3]` is rejected with "relationship
+// pattern must have exactly one type in Query engine". So the two ways a
+// compromise spreads — through code you depend on, and through credentials
+// that can publish to you — cannot be walked in a single traversal. They are
+// queried separately (blastRadius.js and sharedMaintainers.js) and unioned in
+// the API layer, which is why /api/blast-radius reports `unifiedExposure`
+// alongside the per-channel numbers rather than getting it from one query.
+

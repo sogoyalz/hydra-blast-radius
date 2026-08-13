@@ -116,6 +116,11 @@
     stroke-linejoin: round;
   }
   .edge { stroke: #3a4a5c; stroke-width: 1.4px; fill: none; marker-end: url(#arrow); }
+  /* A traced path: the specific chain that causes an exposure, lit up over
+     the rest of the graph so the mechanism is visible, not just membership. */
+  .edge.edge-hot { stroke: var(--accent); stroke-width: 2.6px; }
+  .node.node-hot circle { stroke: var(--accent); stroke-width: 3px; }
+  .node.node-hot text { fill: var(--accent); font-weight: 700; }
   .ring { fill: none; stroke: var(--border); stroke-dasharray: 3 4; }
   #sidebar {
     padding: 20px;
@@ -202,6 +207,12 @@
     <h2>Result</h2>
     <div id="summary">Enter a package above and compute its blast radius.</div>
 
+    <h2>Traced path</h2>
+    <div id="path-result" style="font-size:13px;line-height:1.6">
+      <span style="color:var(--muted)">Click any node in the graph to trace the exact
+      chain that exposes it.</span>
+    </div>
+
     <h2>Shared publish rights</h2>
     <div id="maintainer-result" style="font-size:13px;line-height:1.6">
       <span style="color:var(--muted)">Compute a blast radius to see which packages share
@@ -226,6 +237,10 @@
 const HOP_COLORS = ["var(--accent)", "var(--hop1)", "var(--hop2)", "var(--hop3)"];
 const HOP_FALLBACK = "var(--hopN)";
 function hopColor(hop) { return HOP_COLORS[hop] ?? HOP_FALLBACK; }
+
+// Last blast-radius response, kept so a node click can trace a path through
+// it without re-querying.
+let lastData = null;
 
 const svg = document.getElementById("graph");
 const ringsG = document.getElementById("rings");
@@ -360,11 +375,18 @@ function render(data) {
     });
   }
 
+  // Keep handles on the rendered elements so a click can highlight an actual
+  // path through them without re-rendering the whole graph.
+  edgeEls.clear();
+  nodeEls.clear();
+
   for (const e of data.edges) {
     const a = pos.get(e.from);
     const b = pos.get(e.to);
     if (!a || !b) continue;
-    edgesG.appendChild(el("line", { class: "edge", x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
+    const line = el("line", { class: "edge", x1: a.x, y1: a.y, x2: b.x, y2: b.y });
+    edgesG.appendChild(line);
+    edgeEls.set(`${e.from} ${e.to}`, line);
   }
 
   for (const n of data.nodes) {
@@ -395,10 +417,99 @@ function render(data) {
     label.textContent = n.name;
     g.appendChild(label);
     const title = el("title", {});
-    title.textContent = `${n.name} (${n.hop === 0 ? "target" : n.hop + " hop(s) away"})`;
+    title.textContent = `${n.name} (${n.hop === 0 ? "target" : n.hop + " hop(s) away"}) — click to trace the path`;
     g.appendChild(title);
+
+    g.addEventListener("click", () => showPath(n.name));
+    nodeEls.set(n.name, g);
     nodesG.appendChild(g);
   }
+}
+
+// --- path tracing ------------------------------------------------------
+// Membership ("this package is exposed") is the weaker claim; the chain that
+// causes the exposure is the interesting one. The blast-radius response
+// already carries every DEPENDS_ON edge among the exposed set, so the exact
+// path is recoverable client-side with a BFS — no extra HydraDB query.
+const edgeEls = new Map(); // "from to" -> <line>
+const nodeEls = new Map(); // name -> <g>
+
+// Shortest chain of DEPENDS_ON edges from `to` back to the target, i.e. the
+// concrete reason `to` is exposed. Edges point dependent -> dependency, so
+// walking from the target outward means following them in reverse.
+function findPath(edges, target, to) {
+  if (target === to) return [target];
+  const dependents = new Map(); // dependency -> [dependents]
+  for (const e of edges) {
+    if (!dependents.has(e.to)) dependents.set(e.to, []);
+    dependents.get(e.to).push(e.from);
+  }
+  const prev = new Map([[target, null]]);
+  const queue = [target];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const next of dependents.get(cur) ?? []) {
+      if (prev.has(next)) continue;
+      prev.set(next, cur);
+      if (next === to) {
+        const path = [];
+        for (let n = to; n != null; n = prev.get(n)) path.push(n);
+        return path.reverse();
+      }
+      queue.push(next);
+    }
+  }
+  return null;
+}
+
+function clearHighlight() {
+  for (const line of edgeEls.values()) line.classList.remove("edge-hot");
+  for (const g of nodeEls.values()) g.classList.remove("node-hot");
+}
+
+function showPath(name) {
+  clearHighlight();
+  const box = document.getElementById("path-result");
+  if (!lastData) return;
+
+  const path = findPath(lastData.edges, lastData.target, name);
+  if (!path || path.length < 2) {
+    // Reachable only through shared publish rights: no dependency edge
+    // explains it, which is exactly the finding worth surfacing.
+    const viaMaintainer = (lastData.maintainers?.groups ?? []).find((g) =>
+      g.packages.includes(name)
+    );
+    if (viaMaintainer) {
+      nodeEls.get(lastData.target)?.classList.add("node-hot");
+      box.innerHTML = `<strong>${esc(name)}</strong> is <em>not</em> reachable through any
+        dependency edge. It is exposed because
+        <strong>${esc(viaMaintainer.maintainer)}</strong> can publish to both it and
+        <strong>${esc(lastData.target)}</strong>.
+        <div style="margin-top:6px;color:var(--muted)">${esc(lastData.target)}
+        &nbsp;&rarr;&nbsp; ${esc(viaMaintainer.maintainer)} &nbsp;&rarr;&nbsp; ${esc(name)}</div>`;
+    } else {
+      box.innerHTML = `<span style="color:var(--muted)">${esc(name)} is the target.</span>`;
+      nodeEls.get(name)?.classList.add("node-hot");
+    }
+    return;
+  }
+
+  // Highlight each hop. The stored edge key is dependent->dependency, so a
+  // path step target..dependent maps to the edge (next, cur).
+  for (let i = 0; i < path.length - 1; i++) {
+    edgeEls.get(`${path[i + 1]} ${path[i]}`)?.classList.add("edge-hot");
+  }
+  for (const n of path) nodeEls.get(n)?.classList.add("node-hot");
+
+  box.innerHTML = `<strong>${path.length - 1}-hop dependency path</strong>
+    <div style="margin-top:6px;line-height:1.8">${path
+      .slice()
+      .reverse()
+      .map(esc)
+      .join(' <span style="color:var(--muted)">&rarr;</span> ')}</div>
+    <div style="margin-top:6px;color:var(--muted);font-size:12px">Read left to right:
+      each package depends on the next, so a compromise of
+      ${esc(lastData.target)} reaches ${esc(name)}.</div>`;
 }
 
 // The dependency graph is only one of the two ways a compromise spreads.
@@ -451,11 +562,28 @@ async function computeBlastRadius() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? "request failed");
 
+    lastData = data;
     render(data);
+    document.getElementById("path-result").innerHTML =
+      `<span style="color:var(--muted)">Click any node in the graph to trace the exact
+      chain that exposes it.</span>`;
     const exposedCount = data.nodes.length - 1;
-    summaryEl.innerHTML = `<div class="big">${exposedCount}</div>
-      package${exposedCount === 1 ? "" : "s"} transitively exposed if
-      <strong>${esc(data.target)}</strong> is compromised.<br/><br/>
+    const u = data.unifiedExposure;
+
+    // Lead with the union of both attack channels. Either number alone
+    // understates the real exposure: dependencies miss shared credentials,
+    // credentials miss the dependency tree. The breakdown underneath keeps
+    // it honest about where each package came from.
+    summaryEl.innerHTML = `<div class="big">${u.total}</div>
+      package${u.total === 1 ? "" : "s"} in the total blast radius of
+      <strong>${esc(data.target)}</strong>, combining both attack paths.
+      <div style="margin:10px 0 12px;font-size:12.5px;line-height:1.7;color:var(--muted)">
+        <span style="color:var(--hop1)">&#9679;</span> ${u.viaDependencyOnly} via dependencies only<br/>
+        <span style="color:var(--danger)">&#9679;</span> ${u.viaMaintainerOnly} via shared publish rights only<br/>
+        <span style="color:var(--hopN)">&#9679;</span> ${u.viaBoth} via both
+      </div>
+      <span style="color:var(--muted)">A dependency-only scanner reports
+      <strong style="color:var(--text)">${exposedCount}</strong>.</span><br/><br/>
       <strong>${data.coreQueryMs}ms</strong> &mdash; single HydraDB traversal
       answering the exposure question.<br/>
       <span style="color:var(--muted)">${data.totalMs}ms total for
