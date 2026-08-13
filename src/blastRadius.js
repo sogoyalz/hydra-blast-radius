@@ -71,6 +71,11 @@ export async function blastRadiusWithHops(name, maxDepth = 6) {
   for (const pkg of exposed) {
     if (!hopOf.has(pkg)) hopOf.set(pkg, maxDepth);
   }
+  // The target can reappear in its own blast radius via a dependency cycle
+  // (peerDeps merged into DEPENDS_ON routinely create these). It is already
+  // the hop-0 node, so drop it here to avoid listing it twice and
+  // over-counting the exposed total by one.
+  hopOf.delete(name);
 
   // Edges among the exposed set, fetched concurrently rather than one
   // round trip at a time.

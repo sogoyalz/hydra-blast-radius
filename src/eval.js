@@ -120,6 +120,14 @@ async function main() {
     console.log(`NOTE: hit the --max-nodes=${maxNodes} cap; this graph is partial.`);
   }
 
+  // Guard against a vacuous pass: an empty crawl has no targets, and
+  // precision/recall over empty sets both default to 1, so without this the
+  // script would print "All targets match" having compared nothing.
+  if (edges.length === 0) {
+    console.error(`No edges discovered for "${root}" — nothing to evaluate. Try a package with dependencies.`);
+    process.exit(1);
+  }
+
   console.log(`Writing to HydraDB...`);
   await writeEdges(edges);
 

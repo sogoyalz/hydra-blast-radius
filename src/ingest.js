@@ -20,16 +20,35 @@ function parseArgs(argv) {
   const opts = { root, depth: 4, maxNodes: 300 };
   for (const arg of rest) {
     const [key, value] = arg.replace(/^--/, "").split("=");
-    if (key === "depth") opts.depth = Number(value);
-    if (key === "max-nodes") opts.maxNodes = Number(value);
+    // Validate positive integers: an unnoticed typo like --max-nodes=abc
+    // yields NaN, and `visited.size >= NaN` / `depth < NaN` are always false,
+    // which silently disables the crawl cap (unbounded walk) or the depth
+    // bound (empty result). Fail loudly instead.
+    if (key === "depth" || key === "max-nodes") {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1) {
+        console.error(`--${key} must be a positive integer, got "${value}"`);
+        process.exit(1);
+      }
+      if (key === "depth") opts.depth = n;
+      else opts.maxNodes = n;
+    }
   }
   return opts;
 }
 
-// npm registry path for a package's manifest. Scoped names ("@scope/pkg")
-// need their "/" escaped; "@" is left as-is, which the registry accepts.
+// npm registry path for a package's manifest. Dependency names come from
+// third-party manifests, so a malformed key like "../../-/user/x" must not be
+// able to steer the fetch off the manifest endpoint. encodeURIComponent
+// escapes everything (including "/", "?", "#", ".."), then the one legitimate
+// slash in a scoped name is restored as the registry-accepted "%2f".
 function registryUrl(name) {
-  return `${REGISTRY}/${name.replace("/", "%2f")}/latest`;
+  const scoped = name.startsWith("@") && name.includes("/");
+  if (scoped) {
+    const [scope, pkg] = name.split("/", 2);
+    return `${REGISTRY}/${encodeURIComponent(scope)}%2f${encodeURIComponent(pkg)}/latest`;
+  }
+  return `${REGISTRY}/${encodeURIComponent(name)}/latest`;
 }
 
 async function fetchManifest(name) {
@@ -169,6 +188,7 @@ export async function writeEdges(edges) {
     process.stderr.write(`\rwrote ${written}/${edges.length} edges${failed ? ` (${failed} failed)` : ""}...`);
   });
   process.stderr.write("\n");
+  return { written, failed };
 }
 
 // Publish-rights edges, mirrored for the same reason dependency edges are:
@@ -197,6 +217,7 @@ export async function writeMaintainers(links) {
     process.stderr.write(`\rwrote ${written}/${links.length} maintainer links${failed ? ` (${failed} failed)` : ""}...`);
   });
   process.stderr.write("\n");
+  return { written, failed };
 }
 
 async function main() {
@@ -224,11 +245,25 @@ async function main() {
   }
 
   console.log(`Writing dependency edges to HydraDB...`);
-  await writeEdges(edges);
+  const depResult = await writeEdges(edges);
 
+  let maintResult = { failed: 0 };
   if (maintainedBy.length > 0) {
     console.log(`Writing maintainer edges to HydraDB...`);
-    await writeMaintainers(maintainedBy);
+    maintResult = await writeMaintainers(maintainedBy);
+  }
+
+  // A failed write is not cosmetic: every blast-radius answer traverses the
+  // REQUIRED_BY mirror, so a dropped write makes an exposed package silently
+  // invisible. Exit non-zero so a partial ingest can't pass as a clean graph
+  // (and so setup.sh's `set -e` stops rather than serving bad data).
+  const totalFailed = depResult.failed + maintResult.failed;
+  if (totalFailed > 0) {
+    console.error(
+      `\nERROR: ${totalFailed} edge write(s) failed. The graph is incomplete — ` +
+      `blast-radius results would under-report. Re-run ingestion.`
+    );
+    process.exit(1);
   }
 
   console.log(

@@ -21,7 +21,7 @@ Working end-to-end, including the demo UI. Of the six questions the track brief 
 | Brief's question | Status |
 |---|---|
 | What is the complete blast radius? | ✅ `src/blastRadius.js` |
-| Which services are transitively exposed? | ✅ same traversal, with hop distance |
+| Which services are transitively exposed? | ✅ `src/blastRadius.js`, reported with hop distance |
 | Which packages share maintainers with it? | ✅ `src/sharedMaintainers.js` |
 | Are there likely typosquats nearby? | ✅ `src/typosquat.js` |
 | Which version introduced the vulnerability? | ❌ graph is version-less today |
@@ -35,9 +35,9 @@ Plus a correctness eval (independently-computed ground truth vs. HydraDB's own t
 node src/server.js --port=8787
 ```
 
-Then open `http://127.0.0.1:8787`, type a package name that's already in the graph (the input autocompletes from `/api/packages`), and click "Compute blast radius". Try `qs` or `debug` after ingesting `webpack` and `express` as below.
+Then open `http://127.0.0.1:8787`, type a package name that's already in the graph (the input autocompletes from `/api/packages`), and click "Compute blast radius". Try `body-parser`, `qs`, or `debug`.
 
-**Demo-ready example:** ingesting `webpack` and `express` (`node src/ingest.js webpack --depth=4 --max-nodes=400` then `node src/ingest.js express --depth=5 --max-nodes=300` into the same graph) produces 135 real packages that include [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
+**Demo-ready example:** `./setup.sh` ingests `express --depth=4 --max-nodes=250` and `webpack --depth=3 --max-nodes=150` into one graph — **119 real packages**, including [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed, via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
 
 ### The second attack path: shared publish rights
 
@@ -165,7 +165,7 @@ HydraDB's current MERGE/traversal implementation only expands **forward** from a
 - Package metadata: the public [npm registry](https://registry.npmjs.org) (no auth, no API key).
 - Download counts for typosquat confirmation: the public [npm downloads API](https://api.npmjs.org).
 - Vulnerability ground truth in the eval: the public [OSV API](https://api.osv.dev), which serves GitHub Advisory Database records.
-- **No third-party libraries at all** — ingestion, querying, the HTTP server and the frontend run on Node's built-in `fetch`/`node:http` and vanilla browser JS. There is no build step, no bundler, and no CDN request, so `git clone` + `node src/server.js` is the whole setup. `npm install` is not required (there are no dependencies to install).
+- **No third-party libraries at all** — ingestion, querying, the HTTP server and the frontend run on Node's built-in `fetch`/`node:http` and vanilla browser JS. There is no build step, no bundler, and no CDN request, and `npm install` is not required (there are no dependencies to install). The only setup is `./setup.sh`, which also starts HydraDB and loads the demo graph — `node src/server.js` on its own needs a HydraDB instance already running with data in it.
 
 ## License
 

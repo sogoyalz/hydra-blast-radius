@@ -8,9 +8,15 @@
 # database and start over.
 set -euo pipefail
 
+# Run from the repo root regardless of where the script was invoked from, so
+# the cwd-relative `node src/...` calls below and the script-relative data dir
+# always agree. Without this, running e.g. `./hack-hydra/setup.sh` from a
+# parent directory would ingest into a graph the server never reads.
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 CONTAINER=hydradb
 PORT=${PORT:-8787}
-DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hydradb-data"
+DATA_DIR="$PWD/hydradb-data"
 TOKEN='local-development-token-32-bytes'
 FRESH=0
 [[ "${1:-}" == "--fresh" ]] && FRESH=1
@@ -32,6 +38,10 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # The published image is amd64-only; Apple Silicon needs explicit emulation.
+# Expanded below as ${PLATFORM_ARG[@]+"${PLATFORM_ARG[@]}"} rather than a bare
+# "${PLATFORM_ARG[@]}" because the latter is an "unbound variable" error under
+# `set -u` in bash 3.2 (the /bin/bash that ships on macOS) whenever the array
+# is empty — which is exactly the non-arm64 path.
 PLATFORM_ARG=()
 if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
   PLATFORM_ARG=(--platform linux/amd64)
@@ -53,7 +63,7 @@ if docker ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' | grep -q "$CO
 else
   step "Starting HydraDB"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker run -d --name "$CONTAINER" "${PLATFORM_ARG[@]}" \
+  docker run -d --name "$CONTAINER" ${PLATFORM_ARG[@]+"${PLATFORM_ARG[@]}"} \
     --user "$(id -u):$(id -g)" \
     -p 7687:7687 -p 8443:8443 -p 9090:9090 \
     -v "$DATA_DIR:/data" \
@@ -98,8 +108,23 @@ if [[ "${ALREADY:-0}" -gt 20 ]]; then
   step "Graph already loaded (${ALREADY} packages) — skipping ingestion"
 else
   step "Ingesting a real npm dependency graph (this hits the public npm registry)"
-  node src/ingest.js express --depth=4 --max-nodes=250 2>&1 | grep -vE '^\s*(wrote|visited)' || true
-  node src/ingest.js webpack --depth=3 --max-nodes=150 2>&1 | grep -vE '^\s*(wrote|visited)' || true
+  # No `| grep || true` here: piping into a filter discards ingest's exit code,
+  # so a total failure (npm unreachable, every write rejected) would slip past
+  # and the script would cheerfully serve an empty graph. Run it directly so a
+  # non-zero exit trips `set -e` and stops with a real error.
+  node src/ingest.js express --depth=4 --max-nodes=250
+  node src/ingest.js webpack --depth=3 --max-nodes=150
+
+  LOADED=$(node -e '
+  import("./src/hydra.js").then(async ({ runQuery }) => {
+    const rows = await runQuery("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+    console.log(rows.length);
+  }).catch(() => { console.log(0); });
+  ' 2>/dev/null || echo 0)
+  if [[ "${LOADED:-0}" -lt 20 ]]; then
+    fail "Ingestion finished but the graph has only ${LOADED} packages — something went wrong (npm unreachable, or HydraDB rejected the writes). Not starting the server over an empty graph."
+  fi
+  step "Ingested ${LOADED} packages"
 fi
 
 # ---------------------------------------------------------------- serve

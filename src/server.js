@@ -6,7 +6,7 @@
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { extname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { blastRadiusWithHops } from "./blastRadius.js";
 import { findTyposquats } from "./typosquat.js";
@@ -28,9 +28,26 @@ let typosquatCache = null;
 function parsePort(argv) {
   for (const arg of argv) {
     const [key, value] = arg.replace(/^--/, "").split("=");
-    if (key === "port") return Number(value);
+    if (key === "port") {
+      const port = Number(value);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        console.error(`Invalid --port=${value}; must be an integer 1-65535.`);
+        process.exit(1);
+      }
+      return port;
+    }
   }
   return 8787;
+}
+
+// Depth reaches HydraDB as the literal N in `REQUIRED_BY*1..N`, so it must be
+// a small positive integer: NaN/negative would produce a malformed query, and
+// a large value would run an expensive traversal plus that many hop probes.
+// Clamp to the same 1..10 range the UI offers.
+function parseDepth(raw) {
+  const depth = Number(raw);
+  if (!Number.isInteger(depth)) return { ok: false };
+  return { ok: true, depth: Math.max(1, Math.min(10, depth)) };
 }
 
 async function allIngestedPackageNames() {
@@ -39,7 +56,11 @@ async function allIngestedPackageNames() {
 }
 
 function sendJson(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+  if (res.headersSent) return; // a partial response already went out; don't double-send
+  // No wildcard CORS: this is a localhost demo the co-located UI drives
+  // same-origin, so there is no reason to let arbitrary sites a viewer
+  // visits reach into their local instance.
+  res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 }
 
@@ -49,7 +70,10 @@ function sendJson(res, status, body) {
 async function serveStatic(pathname, res) {
   const path = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
   const filePath = join(FRONTEND_DIR, path);
-  if (!filePath.startsWith(FRONTEND_DIR)) {
+  // Boundary compare, not a bare prefix: `startsWith(FRONTEND_DIR)` alone would
+  // also match a sibling directory like `<repo>/frontend-notes`. Require the
+  // resolved path to be FRONTEND_DIR itself or sit under it + a separator.
+  if (filePath !== FRONTEND_DIR && !filePath.startsWith(FRONTEND_DIR + sep)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -67,8 +91,11 @@ async function serveStatic(pathname, res) {
 async function handleApi(req, res, url) {
   if (url.pathname === "/api/blast-radius") {
     const name = url.searchParams.get("name");
-    const depth = Number(url.searchParams.get("depth") ?? 6);
     if (!name) return sendJson(res, 400, { error: "missing ?name=" });
+
+    const parsed = parseDepth(url.searchParams.get("depth") ?? 6);
+    if (!parsed.ok) return sendJson(res, 400, { error: "depth must be an integer 1-10" });
+    const depth = parsed.depth;
 
     const exists = await runQuery(`MATCH (p:Package {id: ${packageId(name)}}) RETURN p.name AS name`);
     if (exists.length === 0) {
@@ -98,18 +125,26 @@ async function handleApi(req, res, url) {
   if (url.pathname === "/api/shared-maintainers") {
     const name = url.searchParams.get("name");
     if (!name) return sendJson(res, 400, { error: "missing ?name=" });
+    // Same 404-on-unknown behavior as /api/blast-radius, so an empty result
+    // means "no shared maintainers", not "package isn't in the graph".
+    const exists = await runQuery(`MATCH (p:Package {id: ${packageId(name)}}) RETURN p.name AS name`);
+    if (exists.length === 0) {
+      return sendJson(res, 404, { error: `"${name}" is not in the ingested graph` });
+    }
     return sendJson(res, 200, await sharedMaintainerReach(name));
   }
 
   if (url.pathname === "/api/typosquat") {
     // The scan hits the npm downloads API once per candidate, so its result
-    // is cached: it only changes when the ingested package set changes, and
-    // the frontend requests it on every page load.
+    // is cached. The key is the actual sorted name set, not the count — an
+    // ingest that swaps some packages for others (same total) must still
+    // invalidate. The frontend requests this on every page load.
     const names = await allIngestedPackageNames();
-    if (!typosquatCache || typosquatCache.packageCount !== names.length) {
-      typosquatCache = { packageCount: names.length, suspects: await findTyposquats(names) };
+    const key = names.slice().sort().join("\n");
+    if (!typosquatCache || typosquatCache.key !== key) {
+      typosquatCache = { key, packageCount: names.length, suspects: await findTyposquats(names) };
     }
-    return sendJson(res, 200, typosquatCache);
+    return sendJson(res, 200, { packageCount: typosquatCache.packageCount, suspects: typosquatCache.suspects });
   }
 
   if (url.pathname === "/api/packages") {
@@ -122,16 +157,20 @@ async function handleApi(req, res, url) {
 
 const port = parsePort(process.argv.slice(2));
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
   try {
+    // Inside the try: a malformed Host header makes `new URL` throw, and an
+    // uncaught throw in an async request handler takes the whole process down.
+    const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
     } else {
       await serveStatic(url.pathname, res);
     }
   } catch (err) {
+    // Log the detail server-side; return a generic message so internal errors
+    // (including raw HydraDB responses) are never echoed to the client.
     console.error(err);
-    sendJson(res, 500, { error: err.message });
+    sendJson(res, 500, { error: "internal server error" });
   }
 });
 

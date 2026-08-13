@@ -246,11 +246,25 @@ function el(tag, attrs) {
   return e;
 }
 
+// Package and maintainer names come from third-party npm manifests (the keys
+// of an arbitrary package's dependency map), so they are attacker-controlled
+// and must never be interpolated raw into innerHTML. Everything below that
+// builds HTML strings from a name/value runs it through this first. The SVG
+// path uses textContent/setAttribute and needs no escaping.
+function esc(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 async function loadPackageList() {
   try {
     const res = await fetch("/api/packages");
     const { names } = await res.json();
-    pkgList.innerHTML = names.map((n) => `<option value="${n}">`).join("");
+    pkgList.innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
     datalistHint.textContent = `${names.length} packages ingested`;
   } catch {
     datalistHint.textContent = "";
@@ -286,14 +300,14 @@ async function loadTyposquats() {
         const cls = s.suspicion === "likely coincidence" ? "coincidence" : s.suspicion;
         const ratio = s.downloadRatio === null ? "n/a" : (s.downloadRatio * 100).toFixed(2) + "%";
         return `<div class="suspect">
-          <span class="badge ${cls}">${s.suspicion}</span>
-          <strong>${s.candidate}</strong> vs <strong>${s.resembles}</strong> (distance ${s.distance})<br/>
-          ${s.candidateWeeklyDownloads.toLocaleString()} downloads/wk vs ${s.resemblesWeeklyDownloads.toLocaleString()} (${ratio})
+          <span class="badge ${esc(cls)}">${esc(s.suspicion)}</span>
+          <strong>${esc(s.candidate)}</strong> vs <strong>${esc(s.resembles)}</strong> (distance ${esc(s.distance)})<br/>
+          ${s.candidateWeeklyDownloads.toLocaleString()} downloads/wk vs ${s.resemblesWeeklyDownloads.toLocaleString()} (${esc(ratio)})
         </div>`;
       })
       .join("");
   } catch (err) {
-    container.innerHTML = `<div style="color:var(--danger);font-size:13px">Failed to load: ${err.message}</div>`;
+    container.innerHTML = `<div style="color:var(--danger);font-size:13px">Failed to load: ${esc(err.message)}</div>`;
   }
 }
 
@@ -395,7 +409,7 @@ function renderMaintainers(data) {
   const m = data.maintainers;
   if (!m || m.groups.length === 0) {
     box.innerHTML = `<span style="color:var(--muted)">No other ingested package shares a
-      maintainer with <strong>${data.target}</strong>.</span>`;
+      maintainer with <strong>${esc(data.target)}</strong>.</span>`;
     return;
   }
 
@@ -412,8 +426,8 @@ function renderMaintainers(data) {
   const groups = m.groups
     .map(
       (g) => `<div class="suspect">
-        <strong>${g.maintainer}</strong> can also publish to ${g.packages.length}:<br/>
-        <span style="color:var(--muted)">${g.packages.slice(0, 12).join(", ")}${
+        <strong>${esc(g.maintainer)}</strong> can also publish to ${g.packages.length}:<br/>
+        <span style="color:var(--muted)">${g.packages.slice(0, 12).map(esc).join(", ")}${
         g.packages.length > 12 ? `, +${g.packages.length - 12} more` : ""
       }</span>
       </div>`
@@ -441,7 +455,7 @@ async function computeBlastRadius() {
     const exposedCount = data.nodes.length - 1;
     summaryEl.innerHTML = `<div class="big">${exposedCount}</div>
       package${exposedCount === 1 ? "" : "s"} transitively exposed if
-      <strong>${data.target}</strong> is compromised.<br/><br/>
+      <strong>${esc(data.target)}</strong> is compromised.<br/><br/>
       <strong>${data.coreQueryMs}ms</strong> &mdash; single HydraDB traversal
       answering the exposure question.<br/>
       <span style="color:var(--muted)">${data.totalMs}ms total for

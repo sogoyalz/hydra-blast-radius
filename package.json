@@ -5,6 +5,9 @@
   "description": "Supply-chain blast-radius analysis for npm packages, built on HydraDB — Hack Hydra Track 2A submission",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "ingest": "node src/ingest.js",
     "blast-radius": "node src/blastRadius.js",
