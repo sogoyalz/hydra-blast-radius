@@ -951,6 +951,10 @@ async function computeBlastRadius() {
   const name = pkgInput.value.trim();
   const depth = Number(depthInput.value) || 6;
   if (!name) return;
+  // Nothing can be queried from an unserved page, and the banner already on
+  // screen says why and what to do; clicking Compute must not replace it with
+  // the raw fetch error it was written to avoid.
+  if (!servedOverHttp()) return;
 
   statusEl.textContent = "Querying HydraDB...";
   statusEl.className = "";
@@ -1026,8 +1030,43 @@ window.addEventListener("resize", scheduleRelayout);
 const graphResizeObserver = new ResizeObserver(scheduleRelayout);
 graphResizeObserver.observe(document.getElementById("svg-wrap"));
 
-loadPackageList();
-loadTyposquats();
+// This page is not a standalone file: every panel on it is answered by the
+// API of the server that serves it, addressed with root-relative paths like
+// /api/packages. Opened straight off disk — double-clicking
+// frontend/index.html, which is an easy and reasonable thing to try — there is
+// no origin for those paths to resolve against, and every fetch fails with
+// "Failed to parse URL from /api/packages" (or a CORS scheme error on
+// file://). That message names the symptom and not one useful thing to do
+// about it, so the real instruction is given here instead of letting three
+// panels fill up with the same cryptic string.
+function servedOverHttp() {
+  return location.protocol === "http:" || location.protocol === "https:";
+}
+
+if (!servedOverHttp()) {
+  const port = 8787;
+  statusEl.className = "error";
+  statusEl.textContent = "";
+  const box = document.createElement("div");
+  box.style.cssText =
+    "margin:10px 0;padding:12px 14px;border:1px solid var(--border);" +
+    "border-left:3px solid var(--danger);border-radius:5px;line-height:1.6;color:var(--fg)";
+  box.innerHTML =
+    `<strong style="color:var(--danger)">This page has to be served, not opened as a file.</strong><br/>` +
+    `It reads live results from the demo server's API, and opened directly ` +
+    `(<code>${esc(location.protocol)}</code>) there is no origin for <code>/api/...</code> to resolve against.` +
+    `<div style="margin-top:8px;color:var(--muted)">Start it and use the served URL:</div>` +
+    `<div style="margin-top:6px"><code>./setup.sh</code> &nbsp;then open&nbsp; ` +
+    `<code>http://127.0.0.1:${port}</code></div>` +
+    `<div style="margin-top:8px;color:var(--muted)">If the server is already up, ` +
+    `<code>http://127.0.0.1:${port}</code> is the same page, working.</div>`;
+  statusEl.appendChild(box);
+  document.getElementById("typosquat-results").innerHTML =
+    `<div style="color:var(--muted);font-size:13px">Unavailable — open the served URL above.</div>`;
+} else {
+  loadPackageList();
+  loadTyposquats();
+}
 
 // Deep links, so a specific finding is a URL rather than a list of steps:
 //   ?pkg=body-parser&maintainer=dougwilson   one credential's whole reach
@@ -1035,7 +1074,10 @@ loadTyposquats();
 // Useful for demos and for citing a concrete result somewhere else.
 const params = new URLSearchParams(location.search);
 const initialPkg = params.get("pkg");
-if (initialPkg) {
+// Skipped when unserved for the same reason the startup loads are: the query
+// would fail with the same unhelpful message and overwrite the explanation
+// that says how to fix it.
+if (initialPkg && servedOverHttp()) {
   pkgInput.value = initialPkg;
   const depthParam = params.get("depth");
   if (depthParam) depthInput.value = depthParam;
