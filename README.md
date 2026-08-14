@@ -45,6 +45,8 @@ Because it returns *paths* rather than endpoints, one round trip carries everyth
 | `send` | **1 query** | 5 queries | **16x** |
 | `body-parser` | **1 query** | 4 queries | **15x** |
 
+*Measured on the 120-package demo graph `./setup.sh` builds. It does not hold at every scale, and the reason is worth reading before trusting the number: see [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one).*
+
 Calling it at all took some finding, and both discoveries are the kind that cost an afternoon:
 
 - The request field is **`parameters`**, not `params`. A field named `params` is accepted by the transport and silently ignored, so the server answers `missing OpenCypher query parameter $sourceNode` while the parameter is sitting in the request body.
@@ -55,6 +57,22 @@ Calling it at all took some finding, and both discoveries are the kind that cost
 - Variable-length `MATCH` only expands **forward from a fixed source id**, so "who depends on X" is impossible as a reverse query. A mirrored `REQUIRED_BY` edge is written at ingest time so the question becomes a forward traversal. ([why](#why-the-mirrored-edge))
 - Vertex identity is the integer `id` **alone — labels do not scope it**, and they accumulate. Hashing maintainer names in the same space as package names would have silently fused maintainer `ljharb` with a package named `ljharb`. Ids are namespaced per type. ([why](#why-vertex-ids-are-hashed-and-namespaced))
 - A relationship pattern may name **exactly one type** — `[:REQUIRED_BY|MAINTAINS*1..3]` is rejected outright. So the two channels genuinely cannot be walked in one traversal; they are queried separately and unioned in `src/server.js`. That is a design consequence, not a shortcut.
+
+### The path ceiling, and why the fast path is not always the right one
+
+`algo.SSpaths` **silently caps at 1024 paths**, whatever you ask for. Requesting 100, 500 or 1000 returns exactly that many; requesting 2000, 5000 or 20000 all return exactly 1024. It is not documented and there is no flag, warning, or truncation marker in the response — the reply to a saturated query is shaped exactly like the reply to a complete one.
+
+That matters far more here than a missing feature would, because this returns *paths*, and path count grows combinatorially with graph density while the answer we want — the exposed set — grows linearly. So the ceiling is reached long before the graph is large, and **the failure mode is a blast radius that is quietly too small.** Measured on a 1,024-package graph built from a dozen real roots:
+
+| Target | Reported by the native path | Actually exposed | Silently missing |
+|---|---|---|---|
+| `chalk` | 68 | **89** | 21 packages |
+| `tslib` | 72 | **84** | 12 packages |
+| `semver` | 109 | **120** | 11 packages |
+
+For a security tool that is the worst failure available: under-reporting exposure reads exactly like safety. `src/blastRadius.js` therefore requests **exactly the ceiling** and treats a full-ceiling response as *possibly truncated*, falling back to the exhaustive variable-length traversal — which has no such cap — whenever it sees one. The fast path is used only where it is provably complete, and every target above now returns the full set. (Asking for more than the ceiling is what makes saturation undetectable: request 2000, receive 1024, and a "did we hit the cap?" check comparing against 2000 can never fire. That was the bug, and it was found by testing at scale rather than by reading the docs.)
+
+The consequence is worth stating plainly, because it cuts against the speedup table above: **on a large graph the popular packages — the ones whose blast radius you most want — are exactly the ones that fall back to the slower, exhaustive path.** The single-query result is real, and it is what the demo graph runs on; it is not a claim about every graph.
 
 **Proof the traversal is correct.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. This is a correctness gate on the ingest → store → traverse round trip, not a vulnerability-detection accuracy score — the distinction matters and is spelled out in [the eval section](#correctness-eval).
 
@@ -160,7 +178,7 @@ Run it against a **freshly reset** database: HydraDB accumulates everything prev
 
 ### On the latency numbers
 
-The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the single `algo.SSpaths` call that answers "what is exposed" and returns the shape needed to draw it — typically 4–6ms warm, and the only number that should be read as HydraDB's query speed. **`totalMs`** additionally covers the existence check and the separate publish-rights traversal, which is a genuinely different question against a different edge type. The UI also names which engine path answered, because that is not cosmetic: on the fallback, `coreQueryMs` covers only the first of several queries and `totalMs` also absorbs hop-distance probes and per-package edge lookups that exist *only to draw the graph*. Those were never folded into a single flattering number, and now that the native procedure removes them entirely, the honest comparison is still on the record above.
+The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the single `algo.SSpaths` call that answers "what is exposed" and returns the shape needed to draw it — typically 4–6ms warm on the demo graph, and the only number that should be read as HydraDB's query speed. That figure is scale-dependent, and honestly so: on the 1,024-package graph described under [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one) the same call runs 400–1300ms, because the work is proportional to the number of *paths* enumerated rather than to the size of the answer. **`totalMs`** additionally covers the existence check and the separate publish-rights traversal, which is a genuinely different question against a different edge type. The UI also names which engine path answered, because that is not cosmetic: on the fallback, `coreQueryMs` covers only the first of several queries and `totalMs` also absorbs hop-distance probes and per-package edge lookups that exist *only to draw the graph*. Those were never folded into a single flattering number, and now that the native procedure removes them entirely, the honest comparison is still on the record above.
 
 ### On cost
 

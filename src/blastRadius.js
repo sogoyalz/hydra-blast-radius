@@ -33,12 +33,24 @@ export async function blastRadius(name, depth = 6) {
   return rows.map((r) => r.name).filter(Boolean);
 }
 
-// Upper bound on paths requested from the native procedure. Generous enough
-// that the demo graph never approaches it, but it is a real cap: if the
-// engine returns exactly this many, the answer may be incomplete, and an
-// incomplete blast radius presented as complete is the one failure this tool
-// cannot afford. That case falls back to the exhaustive method below.
-const PATH_COUNT = 2000;
+// Upper bound on paths requested from the native procedure. If the engine
+// returns this many the answer may be incomplete, and an incomplete blast
+// radius presented as complete is the one failure this tool cannot afford —
+// that case falls back to the exhaustive method below.
+//
+// This is 1024 because that is the engine's OWN ceiling, measured rather than
+// assumed: asking for 100/500/1000 returns exactly that many, but asking for
+// 2000, 5000 or 20000 all return exactly 1024. An earlier version of this file
+// requested 2000 and treated "returned >= 2000" as the partial-result signal,
+// which could therefore never fire — so on a graph big enough to saturate,
+// truncated results were silently reported as complete. That was not
+// hypothetical: on a 1024-package graph the native path reported 68 packages
+// exposed by `chalk` against a true 89, 72 for `tslib` against 84, and 109 for
+// `semver` against 120. Requesting exactly the ceiling makes saturation
+// detectable. If a later image raises the ceiling, this stays correct — it
+// just falls back to the exhaustive path more eagerly than strictly necessary,
+// which is the right way to be wrong here.
+const PATH_COUNT = 1024;
 
 // The whole question — what is exposed, how far away each thing is, and the
 // edges that connect them — answered by ONE call to HydraDB's native
@@ -67,7 +79,10 @@ export async function blastRadiusNative(name, maxDepth = 6) {
   const coreQueryMs = Date.now() - start;
 
   if (rows.length >= PATH_COUNT) {
-    throw new Error(`algo.SSpaths hit the ${PATH_COUNT}-path cap; result may be partial`);
+    throw new Error(
+      `algo.SSpaths returned ${rows.length} paths, at the engine's ceiling; ` +
+        `result may be partial`
+    );
   }
 
   const nameOfVertex = new Map(); // vertex id -> package name

@@ -199,6 +199,23 @@ async function main() {
     const { precision, recall, f1, truePositives } = precisionRecall(hydraResult, truth);
     const knownAdvisories = await osvAdvisoryCount(target);
 
+    // Not every "extra" is an error. HydraDB accumulates every graph ever
+    // ingested, so on a database that already holds another crawl it can
+    // return dependents this crawl never saw — those are correct answers the
+    // in-memory ground truth simply has no way to know about. Splitting the
+    // extras by whether the package was part of THIS crawl separates the two
+    // cases: a package outside the crawl is prior knowledge, while one inside
+    // the crawl that the BFS did not reach is a genuine disagreement and the
+    // only kind that should fail the run.
+    //
+    // Without this split the eval printed a red FAIL on any non-fresh
+    // database — including the obvious path of running ./setup.sh and then
+    // the eval command the README suggests — which looks like a broken
+    // project rather than the expected consequence of a richer graph.
+    const extras = [...hydraResult].filter((p) => !truth.has(p));
+    const fromPriorIngest = extras.filter((p) => !nodes.has(p));
+    const contradictions = extras.filter((p) => nodes.has(p));
+
     rows.push({
       target,
       groundTruth: truth.size,
@@ -209,10 +226,14 @@ async function main() {
       f1,
       latencyMs,
       knownAdvisories,
+      priorIngest: fromPriorIngest.length,
+      contradictions,
     });
   }
 
-  console.log("target".padEnd(20), "truth".padEnd(7), "hydra".padEnd(7), "P".padEnd(6), "R".padEnd(6), "F1".padEnd(6), "ms".padEnd(6), "OSV advisories");
+  const priorTotal = rows.reduce((n, r) => n + r.priorIngest, 0);
+
+  console.log("target".padEnd(20), "truth".padEnd(7), "hydra".padEnd(7), "P".padEnd(6), "R".padEnd(6), "F1".padEnd(6), "ms".padEnd(6), "prior".padEnd(6), "OSV advisories");
   for (const r of rows) {
     console.log(
       r.target.padEnd(20),
@@ -222,18 +243,48 @@ async function main() {
       r.recall.toFixed(2).padEnd(6),
       r.f1.toFixed(2).padEnd(6),
       String(r.latencyMs).padEnd(6),
+      String(r.priorIngest).padEnd(6),
       r.knownAdvisories
     );
   }
 
-  const allMatch = rows.every((r) => r.precision === 1 && r.recall === 1);
-  console.log(
-    allMatch
-      ? "\nPASS — HydraDB's blast radius exactly matches the independently computed ground truth\n" +
-        "       on every target. This gates the ingest -> store -> traverse round trip; it is not\n" +
-        "       a vulnerability-detection accuracy score (see the note at the top of this file)."
-      : "\nFAIL — HydraDB's traversal disagrees with the in-memory ground truth on at least one target."
-  );
+  // Recall must be perfect (nothing reachable may be missed — the failure that
+  // matters for a security tool) and nothing inside this crawl may be claimed
+  // that the independent BFS did not reach.
+  const missed = rows.filter((r) => r.recall < 1);
+  const contradicted = rows.filter((r) => r.contradictions.length > 0);
+  const clean = missed.length === 0 && contradicted.length === 0;
+
+  if (!clean) {
+    console.log("\nFAIL — HydraDB's traversal disagrees with the independently computed ground truth.");
+    for (const r of missed) {
+      console.log(`       ${r.target}: recall ${r.recall.toFixed(2)} — reachable packages were NOT returned.`);
+    }
+    for (const r of contradicted) {
+      console.log(
+        `       ${r.target}: returned ${r.contradictions.length} package(s) from this crawl that the BFS ` +
+        `never reached (${r.contradictions.slice(0, 5).join(", ")}).`
+      );
+    }
+    process.exitCode = 1;
+  } else if (priorTotal > 0) {
+    console.log(
+      `\nPASS — every package reachable in this crawl was returned, and nothing from this crawl\n` +
+      `       was returned that should not have been (recall 1.00, no contradictions).\n\n` +
+      `       The precision column is below 1.00 only because this database already held other\n` +
+      `       ingests: ${priorTotal} returned package(s) are real dependents from an earlier crawl that\n` +
+      `       this run's in-memory ground truth cannot know about — correct answers scored as\n` +
+      `       false positives. Run ./setup.sh --fresh first for a clean 1.00/1.00 table.\n\n` +
+      `       This gates the ingest -> store -> traverse round trip; it is not a\n` +
+      `       vulnerability-detection accuracy score (see the note at the top of this file).`
+    );
+  } else {
+    console.log(
+      "\nPASS — HydraDB's blast radius exactly matches the independently computed ground truth\n" +
+      "       on every target. This gates the ingest -> store -> traverse round trip; it is not\n" +
+      "       a vulnerability-detection accuracy score (see the note at the top of this file)."
+    );
+  }
 }
 
 main().catch((err) => {
