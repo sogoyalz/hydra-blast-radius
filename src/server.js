@@ -22,8 +22,17 @@ const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
 };
 
-// Invalidated whenever the ingested package count changes.
-let typosquatCache = null;
+// Invalidated whenever the ingested package set changes.
+let typosquatCache = null; // { key, packageCount, suspects }
+
+// The scan in flight, shared by every request that arrives while it runs.
+// Without this the cache only helps AFTER the first scan finishes, so N
+// requests landing on a cold cache all start their own scan — and each one
+// costs two npm download lookups per candidate. The frontend requests this on
+// every page load, so a reload or a couple of open tabs is enough to multiply
+// the outbound calls and invite rate limiting for answers that are all
+// identical anyway.
+let typosquatInFlight = null; // { key, promise }
 
 function parsePort(argv) {
   for (const arg of argv) {
@@ -160,10 +169,31 @@ async function handleApi(req, res, url) {
     // invalidate. The frontend requests this on every page load.
     const names = await allIngestedPackageNames();
     const key = names.slice().sort().join("\n");
-    if (!typosquatCache || typosquatCache.key !== key) {
-      typosquatCache = { key, packageCount: names.length, suspects: await findTyposquats(names) };
+    if (typosquatCache?.key === key) {
+      return sendJson(res, 200, {
+        packageCount: typosquatCache.packageCount,
+        suspects: typosquatCache.suspects,
+      });
     }
-    return sendJson(res, 200, { packageCount: typosquatCache.packageCount, suspects: typosquatCache.suspects });
+    // Start a scan only if one for this exact package set is not already
+    // running; otherwise join it. Cleared on settle either way, so a scan that
+    // failed (npm unreachable, say) is retried by the next request rather than
+    // leaving a rejected promise cached forever.
+    if (typosquatInFlight?.key !== key) {
+      typosquatInFlight = {
+        key,
+        promise: findTyposquats(names)
+          .then((suspects) => {
+            typosquatCache = { key, packageCount: names.length, suspects };
+            return typosquatCache;
+          })
+          .finally(() => {
+            if (typosquatInFlight?.key === key) typosquatInFlight = null;
+          }),
+      };
+    }
+    const scan = await typosquatInFlight.promise;
+    return sendJson(res, 200, { packageCount: scan.packageCount, suspects: scan.suspects });
   }
 
   if (url.pathname === "/api/packages") {
