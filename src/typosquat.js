@@ -35,7 +35,7 @@ const POPULAR_PACKAGES = [
 
 // Classic edit distance (Levenshtein). Small inputs (package names), so the
 // naive O(n*m) DP table is plenty fast.
-function levenshtein(a, b) {
+export function levenshtein(a, b) {
   const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
   for (let j = 0; j <= b.length; j++) dp[0][j] = j;
   for (let i = 1; i <= a.length; i++) {
@@ -80,7 +80,7 @@ const MIN_NAME_LENGTH = 4;
 // Distance must also be small *relative* to the name, so one edit in a
 // 2-character name is rejected while one edit in "express" is not. 0.34
 // keeps the genuinely interesting cases (isarray/is-array at 0.14,
-// reqeusts/request at 0.29) and drops the short-name coincidences.
+// reqeust/request at 0.29) and drops the short-name coincidences.
 const MAX_DISTANCE_RATIO = 0.34;
 
 export async function findTyposquats(candidateNames, maxDistance = 2) {

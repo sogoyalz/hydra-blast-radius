@@ -42,6 +42,7 @@
 //
 // Usage: node src/eval.js <root-package> [--depth=3] [--max-nodes=150] [--targets=a,b,c]
 
+import { pathToFileURL } from "node:url";
 import { crawl, writeEdges } from "./ingest.js";
 import { blastRadius } from "./blastRadius.js";
 import { fetchWithTimeout } from "./hydra.js";
@@ -81,7 +82,7 @@ function parseArgs(argv) {
 
 // BFS over the in-memory edge list to find every package that transitively
 // depends on `target` — the same question blastRadius() asks HydraDB.
-function groundTruthBlastRadius(edges, target, maxDepth) {
+export function groundTruthBlastRadius(edges, target, maxDepth) {
   const reverseAdj = new Map(); // package -> [packages that depend on it]
   for (const { from, to } of edges) {
     if (!reverseAdj.has(to)) reverseAdj.set(to, []);
@@ -105,7 +106,7 @@ function groundTruthBlastRadius(edges, target, maxDepth) {
   return visited;
 }
 
-function precisionRecall(predicted, actual) {
+export function precisionRecall(predicted, actual) {
   const tp = [...predicted].filter((x) => actual.has(x)).length;
   const precision = predicted.size === 0 ? 1 : tp / predicted.size;
   const recall = actual.size === 0 ? 1 : tp / actual.size;
@@ -287,7 +288,13 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Eval failed:", err);
-  process.exit(1);
-});
+// Same entry-point guard the other CLI files use. Without it, merely
+// importing this module to reuse groundTruthBlastRadius() or precisionRecall()
+// — which the test suite does — kicks off a full npm crawl and writes to
+// HydraDB as a side effect of the import.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("Eval failed:", err);
+    process.exit(1);
+  });
+}

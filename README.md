@@ -109,7 +109,7 @@ Working end-to-end, including the demo UI. Of the six questions the track brief 
 
 The two gaps share one cause and one fix: the graph models packages, not versions. Adding `(:Package)-[:HAS_VERSION]->(:Version)` and ingesting lockfiles would answer both, and it is the obvious next edge type. That was a deliberate trade — the second *attack channel* (publish rights) was worth more than a second *dimension* on the channel already modelled, because the incident the brief opens with spread through credentials, and no amount of version resolution would have caught it.
 
-Plus a correctness eval (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories) and a zero-dependency API + browser visualization (`node src/server.js`, then `http://127.0.0.1:8787`).
+Plus two evals and a test suite: a [round-trip correctness gate](#correctness-eval) (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), [validation against deps.dev](#validation-against-an-independent-source) so the *data* is graded by an outside resolver and not only by this project's own crawl, and [21 unit tests](#unit-tests) (`npm test`) covering the id-collision, escaping, timeout and filter logic. Served through a zero-dependency API + browser visualization (`node src/server.js`, then `http://127.0.0.1:8787`).
 
 ### Running the demo UI
 
@@ -208,6 +208,21 @@ Precision is 0.94, and the script does not wave at the gap — it attributes eve
 
 Two sources of disagreement are separated and labelled rather than folded into the headline number: dependents deps.dev knows that a bounded crawl (`--depth`/`--max-nodes`) never ingested are a **collection** limit, not a traversal miss; dependents this graph has that deps.dev's single resolved version does not are peer edges or version skew, distinguished by checking the manifest.
 
+### Unit tests
+
+```bash
+npm test
+```
+
+21 tests, `node --test`, no dependency added and no running database or network needed — the graph-dependent behaviour is already covered by the two evals above. They are regression tests rather than coverage for its own sake: every case guards a decision made for a stated reason, or a bug that actually happened here and would be silent if it came back.
+
+- **Vertex ids.** A package and a maintainer of the same name must never hash to the same id. HydraDB keys vertices on the integer id alone — labels do not scope identity and they accumulate — so a collision silently fuses two entities into one vertex holding both sets of edges, and npm users routinely publish a package under their own handle. Also asserts ids stay inside the safe-integer range, since they are written into Cypher as integer literals.
+- **`cypherString` escaping.** Names come from third-party manifests and are interpolated into query text, so this is the boundary that stops a registry name terminating the literal. Includes an injection payload, and the backslash-before-quote ordering that keeps a trailing backslash from escaping the closing delimiter.
+- **`fetchWithTimeout`, both halves of a real bug.** One test for a server that never responds, one for a server that sends headers and then stalls mid-body — the second is the case the first version of the fix missed, because it disarmed its timer as soon as headers arrived.
+- **`levenshtein` and the filter thresholds.** Pins the distances the typosquat filter is tuned around, including the short-name pairs (`ms`/`qs`, `acorn`/`cors`) that motivate the ratio rule. Writing these caught a documentation error: `reqeust`/`request` is the distance-2 case the docs meant, while `reqeusts` is distance 3 and is rejected — a typo in the example about typos.
+- **`groundTruthBlastRadius`.** The independent BFS the correctness eval is graded against, so a bug here would quietly corrupt the thing doing the grading. Includes a cyclic graph, since merging `peerDependencies` into dependency edges creates cycles routinely.
+- **`precisionRecall`.** Perfect agreement, one-sided misses, and the empty-set case that must not produce `NaN`.
+
 ### On the latency numbers
 
 The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the single `algo.SSpaths` call that answers "what is exposed" and returns the shape needed to draw it — typically 4–6ms warm on the demo graph, and the only number that should be read as HydraDB's query speed. That figure is scale-dependent, and honestly so: on the 1,024-package graph described under [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one) the same call runs 400–1300ms, because the work is proportional to the number of *paths* enumerated rather than to the size of the answer. **`totalMs`** additionally covers the existence check and the separate publish-rights traversal, which is a genuinely different question against a different edge type. The UI also names which engine path answered, because that is not cosmetic: on the fallback, `coreQueryMs` covers only the first of several queries and `totalMs` also absorbs hop-distance probes and per-package edge lookups that exist *only to draw the graph*. Those were never folded into a single flattering number, and now that the native procedure removes them entirely, the honest comparison is still on the record above.
@@ -228,7 +243,7 @@ The brief's fourth eval axis, alongside precision/recall/latency. There's no met
 This is deliberately two-signal, because each signal alone is wrong in a different way:
 
 - **Edit distance alone over-reports.** `isarray` is a real, independently popular package one edit from `is-array` — and has *more* downloads than it. The ratio reclassifies it as "likely coincidence" instead of flagging it.
-- **Absolute distance is meaningless on short names.** `ms` is one edit from `qs`, and `acorn` is two from `cors`; neither has anything to do with impersonation. Distance must also be small *relative* to name length (≤ 0.34), which drops both while keeping `expres`/`express` and `reqeusts`/`request`.
+- **Absolute distance is meaningless on short names.** `ms` is one edit from `qs`, and `acorn` is two from `cors`; neither has anything to do with impersonation. Distance must also be small *relative* to name length (≤ 0.34), which drops both while keeping `expres`/`express` (distance 1, ratio 0.17) and `reqeust`/`request` (distance 2, ratio 0.29).
 
 The panel leads with the verdict rather than the raw candidate list, since the count that matters is how many survived both filters.
 

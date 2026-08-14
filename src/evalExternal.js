@@ -44,6 +44,7 @@
 //
 // Usage: node src/evalExternal.js [--targets=a,b,c] [--max-packages=N]
 
+import { pathToFileURL } from "node:url";
 import { runQuery, fetchWithTimeout } from "./hydra.js";
 import { blastRadius } from "./blastRadius.js";
 
@@ -345,7 +346,11 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error("External eval failed:", err);
-  process.exit(1);
-});
+// Entry-point guard, as in the other CLI files: importing this module must not
+// fire off a full deps.dev crawl as a side effect.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("External eval failed:", err);
+    process.exit(1);
+  });
+}

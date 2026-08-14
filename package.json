@@ -9,6 +9,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "test": "node --test",
     "ingest": "node src/ingest.js",
     "blast-radius": "node src/blastRadius.js",
     "eval": "node src/eval.js",
