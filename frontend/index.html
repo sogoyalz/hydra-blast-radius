@@ -524,6 +524,24 @@ function render(data, attempt = 0) {
     byHop.get(n.hop).push(n);
   }
 
+  // Which hop rings are too crowded to label. The credential ring already
+  // does this (see labelCred below); the dependency rings did not, so a hub
+  // package on a larger graph drew a name on every one of a hundred-odd nodes
+  // and the ring became a grey smear. The demo graph never reaches it — the
+  // deepest target here places six on a ring — but the README invites
+  // ingesting bigger trees, and a package like `picocolors` on a
+  // thousand-package graph lands 137 nodes in a radius.
+  //
+  // The budget scales with the ring rather than being one flat number,
+  // because circumference grows with hop: an outer ring genuinely fits more
+  // names than the first one does. Suppressed labels cost nothing — the
+  // <title> and the click-to-trace behaviour stay on every node.
+  const labelBudgetForHop = (hop) => Math.max(12, Math.round(12 * hop));
+  const crowdedHops = new Set();
+  for (const [hop, nodesAtHop] of byHop) {
+    if (hop > 0 && nodesAtHop.length > labelBudgetForHop(hop)) crowdedHops.add(hop);
+  }
+
   const pos = new Map();
   for (const [hop, nodesAtHop] of byHop) {
     const rx = hop * ringX;
@@ -644,22 +662,25 @@ function render(data, attempt = 0) {
     // two neighbours are close in angle (this is what merged "get-intrinsic"
     // and "side-channel-map" into one unreadable run); radiating them apart
     // follows the layout's own geometry and keeps them legible.
-    let label;
-    if (n.hop === 0) {
-      label = el("text", { y: -(radius + 7), "text-anchor": "middle" });
-    } else {
-      const dirX = Math.cos(p.angle);
-      const dirY = Math.sin(p.angle);
-      const gap = radius + 7;
-      label = el("text", {
-        x: dirX * gap,
-        y: dirY * gap,
-        "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
-        "dominant-baseline": dirY > 0.4 ? "hanging" : dirY < -0.4 ? "auto" : "middle",
-      });
+    // The target is always labelled; a crowded ring is not (see crowdedHops).
+    if (n.hop === 0 || !crowdedHops.has(n.hop)) {
+      let label;
+      if (n.hop === 0) {
+        label = el("text", { y: -(radius + 7), "text-anchor": "middle" });
+      } else {
+        const dirX = Math.cos(p.angle);
+        const dirY = Math.sin(p.angle);
+        const gap = radius + 7;
+        label = el("text", {
+          x: dirX * gap,
+          y: dirY * gap,
+          "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+          "dominant-baseline": dirY > 0.4 ? "hanging" : dirY < -0.4 ? "auto" : "middle",
+        });
+      }
+      label.textContent = n.name;
+      g.appendChild(label);
     }
-    label.textContent = n.name;
-    g.appendChild(label);
     const title = el("title", {});
     title.textContent = `${n.name} (${n.hop === 0 ? "target" : n.hop + " hop(s) away"}) — click to trace the path`;
     g.appendChild(title);
