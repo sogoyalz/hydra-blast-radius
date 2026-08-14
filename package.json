@@ -12,6 +12,7 @@
     "ingest": "node src/ingest.js",
     "blast-radius": "node src/blastRadius.js",
     "eval": "node src/eval.js",
+    "eval:external": "node src/evalExternal.js",
     "typosquat": "node src/typosquat.js",
     "dev": "node src/server.js"
   }
