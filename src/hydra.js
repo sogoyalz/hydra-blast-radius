@@ -10,13 +10,29 @@ const HYDRA_CELL = process.env.HYDRA_CELL ?? "cell-0";
 // settles. Every endpoint in server.js awaits runQuery(), so one wedged
 // connection freezes the entire demo with no user-facing signal at all.
 // AbortController turns that into a real, catchable error on a bound clock.
+//
+// The body is read INSIDE the guarded window, and that is the whole reason
+// this returns a plain object rather than the Response. Clearing the timer as
+// soon as fetch() resolves only bounds the wait for response *headers*: a
+// backend that sends headers and then stalls mid-body leaves the subsequent
+// res.json() unguarded and hanging forever. Verified directly against a
+// server that writes a partial JSON body and never ends it — with the timer
+// disarmed at header time that read never returns. Reading to completion here
+// keeps the abort signal live across the whole exchange.
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const text = await res.text();
+    return {
+      ok: res.ok,
+      status: res.status,
+      text: () => text,
+      json: () => JSON.parse(text),
+    };
   } catch (err) {
     if (err.name === "AbortError") {
       throw new Error(`request to ${url} timed out after ${timeoutMs}ms`);

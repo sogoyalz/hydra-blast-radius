@@ -341,11 +341,19 @@ function el(tag, attrs) {
 // process itself stops responding — without it a dead server means every
 // panel on this page sits on "Loading..." forever with no way to tell a
 // stall from a slow-but-working query.
+//
+// The body is read inside the guarded window for the same reason the
+// server-side twin does it (see the comment there): clearing the timer when
+// headers arrive leaves a stalled body read unbounded, which is the same hang
+// with extra steps. Returns a plain object rather than the Response because
+// the body has already been consumed by then.
 async function fetchWithTimeout(url, timeoutMs = 25_000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal });
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, json: () => JSON.parse(text) };
   } catch (err) {
     if (err.name === "AbortError") throw new Error(`${url} did not respond within ${timeoutMs / 1000}s`);
     throw err;
@@ -385,7 +393,14 @@ async function loadTyposquats() {
   const container = document.getElementById("typosquat-results");
   try {
     const res = await fetchWithTimeout("/api/typosquat", 25_000);
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `request failed (${res.status})`);
+    if (!res.ok) {
+      // json() parses an already-read body and throws on a non-JSON one
+      // (an upstream proxy's HTML error page, say), so the status is the
+      // fallback rather than letting a parse error mask the real failure.
+      let message = `request failed (${res.status})`;
+      try { message = res.json().error ?? message; } catch { /* body wasn't JSON */ }
+      throw new Error(message);
+    }
     const { packageCount, suspects } = await res.json();
     document.getElementById("typosquat-count").textContent = `(${packageCount} packages scanned)`;
     if (suspects.length === 0) {
