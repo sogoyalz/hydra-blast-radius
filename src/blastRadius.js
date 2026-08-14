@@ -138,11 +138,23 @@ export async function blastRadiusWithHops(name, maxDepth = 6) {
   try {
     return await blastRadiusNative(name, maxDepth);
   } catch (err) {
+    // Why the fallback happened travels with the result rather than only
+    // reaching a server log. The two reasons mean opposite things to whoever
+    // is reading the answer: a saturated path ceiling means the fast path
+    // would have UNDER-REPORTED this specific blast radius and the slower
+    // exhaustive walk is what makes the number trustworthy, which is worth
+    // saying out loud on a security tool. An unavailable procedure just means
+    // a different engine build, with no bearing on completeness.
+    const saturated = err.message.includes("ceiling");
     console.error(
       `algo.SSpaths unavailable or incomplete (${err.message.slice(0, 140)}); ` +
         `falling back to variable-length traversal`
     );
-    return await blastRadiusFanout(name, maxDepth);
+    const result = await blastRadiusFanout(name, maxDepth);
+    return {
+      ...result,
+      fallbackReason: saturated ? "path-ceiling" : "procedure-unavailable",
+    };
   }
 }
 

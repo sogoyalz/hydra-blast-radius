@@ -904,11 +904,26 @@ function engineNote(data) {
       <span style="color:var(--muted)">${data.totalMs}ms total, including the
       separate publish-rights traversal.</span>`;
   }
+  // A saturated path ceiling is not a performance footnote, it is the reason
+  // this number can be trusted: the fast path would have under-reported THIS
+  // radius, so the slower exhaustive walk is what makes it complete. Said
+  // plainly on screen, because a security tool quietly taking the safe branch
+  // is exactly the thing a reader should be told about.
+  const ceiling = data.fallbackReason === "path-ceiling"
+    ? `<div style="margin-top:8px;padding:8px 10px;border:1px solid var(--border);
+         border-left:3px solid var(--hop1);border-radius:4px;font-size:12px;line-height:1.55">
+         <strong style="color:var(--hop1)">Exhaustive path used.</strong>
+         <code>algo.SSpaths</code> hit HydraDB's 1024-path ceiling on this target, and a
+         saturated result is indistinguishable from a complete one. The uncapped
+         variable-length traversal answered instead, so this radius is complete rather
+         than quietly truncated.
+       </div>`
+    : "";
   return `<strong>${data.coreQueryMs}ms</strong> &mdash; single HydraDB
     traversal answering the exposure question.<br/>
     <span style="color:var(--muted)">${data.totalMs}ms total for
     ${data.queryCount} queries, including the hop-distance and edge lookups
-    used only to draw the graph.</span>`;
+    used only to draw the graph.</span>${ceiling}`;
 }
 
 async function computeBlastRadius() {
