@@ -1,0 +1,45 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is the floor the project claims in package.json's engines field
+        # (it is where global fetch arrives, which this code relies on with no
+        # polyfill). Testing the floor and a current release together is what
+        # makes that claim worth anything.
+        node: ["18", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # No install step on purpose: this project has zero third-party
+      # dependencies and no lockfile, so there is nothing to restore. If that
+      # ever stops being true, this job starts failing, which is the intended
+      # alarm rather than an inconvenience.
+      - name: Unit tests
+        run: npm test
+      - name: Assert the dependency-free claim still holds
+        run: |
+          if [ -d node_modules ]; then
+            echo "node_modules exists — the zero-dependency claim in the README is stale."
+            exit 1
+          fi
+          node -e '
+            const pkg = require("./package.json");
+            const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+            const names = Object.keys(deps);
+            if (names.length > 0) {
+              console.error("Third-party dependencies declared: " + names.join(", "));
+              process.exit(1);
+            }
+            console.log("No third-party dependencies declared.");
+          '

@@ -1,5 +1,7 @@
 # Supply Chain Blast Radius
 
+[![test](https://github.com/sogoyalz/hydra-blast-radius/actions/workflows/test.yml/badge.svg)](https://github.com/sogoyalz/hydra-blast-radius/actions/workflows/test.yml)
+
 Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as Graphs").
 
 **The question:** if an npm package is compromised right now, what's exposed? This project builds the npm dependency graph in [HydraDB](https://github.com/hydra-db/hydradb) and answers that with a graph traversal — not a guess, not a vector search.
@@ -214,7 +216,7 @@ Two sources of disagreement are separated and labelled rather than folded into t
 npm test
 ```
 
-21 tests, `node --test`, no dependency added and no running database or network needed — the graph-dependent behaviour is already covered by the two evals above. They are regression tests rather than coverage for its own sake: every case guards a decision made for a stated reason, or a bug that actually happened here and would be silent if it came back.
+21 tests, `node --test`, no dependency added and no running database or network needed. CI runs them on **Node 18 and 22** — 18 because that is the floor `package.json` claims, and a claimed floor nobody tests is just a comment. The same job fails the build if a third-party dependency or a `node_modules` ever appears, so the zero-dependency claim below cannot quietly go stale — the graph-dependent behaviour is already covered by the two evals above. They are regression tests rather than coverage for its own sake: every case guards a decision made for a stated reason, or a bug that actually happened here and would be silent if it came back.
 
 - **Vertex ids.** A package and a maintainer of the same name must never hash to the same id. HydraDB keys vertices on the integer id alone — labels do not scope identity and they accumulate — so a collision silently fuses two entities into one vertex holding both sets of edges, and npm users routinely publish a package under their own handle. Also asserts ids stay inside the safe-integer range, since they are written into Cypher as integer literals.
 - **`cypherString` escaping.** Names come from third-party manifests and are interpolated into query text, so this is the boundary that stops a registry name terminating the literal. Includes an injection payload, and the backslash-before-quote ordering that keeps a trailing backslash from escaping the closing delimiter.
