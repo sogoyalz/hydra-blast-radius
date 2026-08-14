@@ -188,6 +188,47 @@
     border-radius: 4px;
     padding: 1px 4px;
   }
+
+  /* Below this width the fixed 340px sidebar column leaves the graph panel
+     no room at all (it was measured going negative on a 375px phone) and the
+     sidebar itself ran off the right edge of the viewport with no way to
+     reach the clipped text. Stack instead of column: graph gets a fixed
+     share of the viewport height, sidebar flows beneath it at natural
+     height, and the page scrolls normally rather than being clipped to
+     exactly 100vh. */
+  @media (max-width: 700px) {
+    main {
+      grid-template-columns: 1fr;
+      grid-template-rows: 46vh auto;
+      height: auto;
+      min-height: calc(100vh - 65px);
+    }
+    #graph-panel {
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+      height: 46vh;
+    }
+    #sidebar {
+      overflow-y: visible;
+    }
+    #controls {
+      gap: 8px;
+    }
+    input[type="text"], input[list] {
+      min-width: 0;
+      flex: 1 1 160px;
+    }
+  }
+
+  /* Coarse pointers (touch) get a larger hit area than the mouse-tuned 5-6px
+     node radius — the geometry properties below override the JS-set `r`/`x`/
+     `width`/`height` attributes (CSS wins over presentation attributes), so
+     this changes only the hit target, not the layout math those attributes
+     were computed from. */
+  @media (pointer: coarse) {
+    .node circle { r: 9px; }
+    .node rect { x: -8px; y: -8px; width: 16px; height: 16px; }
+  }
 </style>
 </head>
 <body>
@@ -225,7 +266,12 @@
 
   <div id="sidebar">
     <h2>Result</h2>
-    <div id="summary">Enter a package above and compute its blast radius.</div>
+    <div id="summary">Enter a package above and compute its blast radius.
+      <div style="margin-top:10px;font-size:12px;color:var(--muted)">Models packages, not
+      versions — this answers "what's exposed" and "who shares publish rights", not
+      "which version introduced it" or "who resolved the bad version while live".
+      See the README's Status table for why.</div>
+    </div>
 
     <h2>Traced path</h2>
     <div id="path-result" style="font-size:13px;line-height:1.6">
@@ -290,6 +336,24 @@ function el(tag, attrs) {
   return e;
 }
 
+// The server now bounds its own HydraDB calls (see fetchWithTimeout in
+// src/hydra.js), but this is a backstop for the rarer case where the server
+// process itself stops responding — without it a dead server means every
+// panel on this page sits on "Loading..." forever with no way to tell a
+// stall from a slow-but-working query.
+async function fetchWithTimeout(url, timeoutMs = 25_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error(`${url} did not respond within ${timeoutMs / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Package and maintainer names come from third-party npm manifests (the keys
 // of an arbitrary package's dependency map), so they are attacker-controlled
 // and must never be interpolated raw into innerHTML. Everything below that
@@ -306,19 +370,22 @@ function esc(value) {
 
 async function loadPackageList() {
   try {
-    const res = await fetch("/api/packages");
+    const res = await fetchWithTimeout("/api/packages", 10_000);
     const { names } = await res.json();
     pkgList.innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
     datalistHint.textContent = `${names.length} packages ingested`;
-  } catch {
+  } catch (err) {
     datalistHint.textContent = "";
+    statusEl.textContent = `Couldn't load the package list: ${err.message}`;
+    statusEl.className = "error";
   }
 }
 
 async function loadTyposquats() {
   const container = document.getElementById("typosquat-results");
   try {
-    const res = await fetch("/api/typosquat");
+    const res = await fetchWithTimeout("/api/typosquat", 25_000);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `request failed (${res.status})`);
     const { packageCount, suspects } = await res.json();
     document.getElementById("typosquat-count").textContent = `(${packageCount} packages scanned)`;
     if (suspects.length === 0) {
@@ -839,7 +906,7 @@ async function computeBlastRadius() {
   goBtn.disabled = true;
 
   try {
-    const res = await fetch(`/api/blast-radius?name=${encodeURIComponent(name)}&depth=${depth}`);
+    const res = await fetchWithTimeout(`/api/blast-radius?name=${encodeURIComponent(name)}&depth=${depth}`, 25_000);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? "request failed");
 

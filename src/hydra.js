@@ -4,6 +4,29 @@ const HYDRA_NAMESPACE = process.env.HYDRA_NAMESPACE ?? "default";
 const HYDRA_GRAPH = process.env.HYDRA_GRAPH ?? "default";
 const HYDRA_CELL = process.env.HYDRA_CELL ?? "cell-0";
 
+// A stuck HydraDB backend (container alive, TCP accepting, never responding —
+// the actual failure mode a degraded bind mount produces) otherwise hangs a
+// bare fetch() forever: no error, no timeout, just a promise that never
+// settles. Every endpoint in server.js awaits runQuery(), so one wedged
+// connection freezes the entire demo with no user-facing signal at all.
+// AbortController turns that into a real, catchable error on a bound clock.
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`request to ${url} timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Runs one openCypher statement against HydraDB's HTTP query API and returns
 // rows as plain JS values (unwrapped from HydraDB's {type, value} envelopes).
 //
@@ -27,7 +50,7 @@ const HYDRA_CELL = process.env.HYDRA_CELL ?? "cell-0";
 export async function runQuery(query, parameters) {
   const payload = { cell_id: HYDRA_CELL, query };
   if (parameters) payload.parameters = parameters;
-  const res = await fetch(`${HYDRA_HTTP_ADDR}/v1/graphs/${HYDRA_GRAPH}/query`, {
+  const res = await fetchWithTimeout(`${HYDRA_HTTP_ADDR}/v1/graphs/${HYDRA_GRAPH}/query`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${HYDRA_TOKEN}`,

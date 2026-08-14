@@ -5,7 +5,7 @@
 // Usage: node src/ingest.js <package-name> [--depth=4] [--max-nodes=300]
 
 import { pathToFileURL } from "node:url";
-import { runQuery, cypherString, packageId, maintainerId } from "./hydra.js";
+import { runQuery, cypherString, packageId, maintainerId, fetchWithTimeout } from "./hydra.js";
 
 const REGISTRY = "https://registry.npmjs.org";
 const CRAWL_CONCURRENCY = 8;
@@ -52,7 +52,10 @@ function registryUrl(name) {
 }
 
 async function fetchManifest(name) {
-  const res = await fetch(registryUrl(name));
+  // A single stalled registry request must not stall the whole crawl —
+  // callers already treat a thrown error as "skip this package" (see the
+  // try/catch around fetchManifest() in crawl() below).
+  const res = await fetchWithTimeout(registryUrl(name), {}, 10_000);
   if (!res.ok) return null; // unpublished, deprecated-and-removed, private, etc. — skip
   const manifest = await res.json();
   return {

@@ -189,7 +189,16 @@ const server = createServer(async (req, res) => {
     // Log the detail server-side; return a generic message so internal errors
     // (including raw HydraDB responses) are never echoed to the client.
     console.error(err);
-    sendJson(res, 500, { error: "internal server error" });
+    // A timed-out HydraDB call (see fetchWithTimeout in hydra.js) is the one
+    // case worth naming specifically: it's actionable by the person running
+    // the demo ("go check the container"), unlike an arbitrary internal
+    // error, and it used to surface as an infinite "Loading..." with no
+    // signal at all rather than any response, timed out or otherwise.
+    if (err.message?.includes("timed out")) {
+      sendJson(res, 503, { error: "HydraDB isn't responding — check that the container is running and healthy." });
+    } else {
+      sendJson(res, 500, { error: "internal server error" });
+    }
   }
 });
 

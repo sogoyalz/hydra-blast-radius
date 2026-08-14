@@ -152,7 +152,7 @@ else
 fi
 
 # ---------------------------------------------------------------- serve
-step "Starting the demo server"
+print_ready_message() {
 cat <<EOF
 
   Setup complete. Open:  http://127.0.0.1:${PORT}
@@ -173,5 +173,42 @@ cat <<EOF
   Ctrl-C stops the server (HydraDB keeps running; 'docker rm -f hydradb' stops it).
 
 EOF
+}
 
-exec node src/server.js --port="$PORT"
+# Checked before exec'ing the server rather than letting node fail on its own:
+# an unhandled EADDRINUSE prints a raw stack trace, which is a bad note to end
+# an otherwise carefully-guarded setup script on. A plain TCP bind probe (no
+# lsof dependency — this project already requires Node 18+) tells us whether
+# the port is free without needing HTTP semantics. Deliberately no explicit
+# host on listen() here, matching src/server.js's own bare `server.listen(port,
+# ...)` call: an explicit "127.0.0.1" bind does NOT reliably conflict with an
+# existing wildcard (host-less) listener on this port, which made an earlier
+# version of this probe report "free" while the real server call below still
+# hit EADDRINUSE against that same listener (reproduced directly).
+PORT_STATUS=$(node -e '
+const net = require("node:net");
+const srv = net.createServer();
+srv.once("error", () => { console.log("in-use"); process.exit(0); });
+srv.once("listening", () => { srv.close(() => { console.log("free"); process.exit(0); }); });
+srv.listen(Number(process.argv[1]));
+' "$PORT")
+
+if [[ "$PORT_STATUS" == "free" ]]; then
+  step "Starting the demo server"
+  print_ready_message
+  exec node src/server.js --port="$PORT"
+fi
+
+# Something is already on the port. If it's a previous run of this same demo,
+# treat it the way the rest of this script treats already-running state
+# (reuse it, don't error) rather than failing just because setup was re-run
+# with a server still up from last time.
+if curl -fsS -m 2 "http://127.0.0.1:${PORT}/api/packages" >/dev/null 2>&1; then
+  step "Demo server already running on port ${PORT} — reusing it"
+  print_ready_message
+  exit 0
+fi
+
+fail "Port ${PORT} is already in use by something that isn't this demo.
+       Free it (e.g. \`lsof -i :${PORT}\` to find the process), or run on a
+       different port: PORT=8788 ./setup.sh"

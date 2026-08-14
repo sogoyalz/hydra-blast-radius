@@ -7,7 +7,7 @@
 // Usage: node src/typosquat.js [--max-distance=2]
 
 import { pathToFileURL } from "node:url";
-import { runQuery } from "./hydra.js";
+import { runQuery, fetchWithTimeout } from "./hydra.js";
 
 // A static, defensible "popular package" reference set rather than a live
 // popularity API call per candidate (faster, no rate limits, no flakiness
@@ -51,7 +51,14 @@ function levenshtein(a, b) {
 
 async function fetchWeeklyDownloads(name) {
   try {
-    const res = await fetch(`https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(name)}`);
+    // Bounded well under the frontend's own timeout: this runs once per
+    // candidate and a stalled npm API must not be able to hang the whole
+    // /api/typosquat response (the page calls it unconditionally on load).
+    const res = await fetchWithTimeout(
+      `https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(name)}`,
+      {},
+      5_000
+    );
     if (!res.ok) return 0;
     const body = await res.json();
     return body.downloads ?? 0;

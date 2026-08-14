@@ -44,6 +44,7 @@
 
 import { crawl, writeEdges } from "./ingest.js";
 import { blastRadius } from "./blastRadius.js";
+import { fetchWithTimeout } from "./hydra.js";
 
 function parseArgs(argv) {
   const [root, ...rest] = argv;
@@ -119,10 +120,11 @@ async function osvAdvisoryCount(packageName) {
   if (osvCache.has(packageName)) return osvCache.get(packageName);
   let count = 0;
   try {
-    const res = await fetch("https://api.osv.dev/v1/query", {
-      method: "POST",
-      body: JSON.stringify({ package: { name: packageName, ecosystem: "npm" } }),
-    });
+    const res = await fetchWithTimeout(
+      "https://api.osv.dev/v1/query",
+      { method: "POST", body: JSON.stringify({ package: { name: packageName, ecosystem: "npm" } }) },
+      8_000
+    );
     if (res.ok) {
       const body = await res.json();
       count = (body.vulns ?? []).length;
