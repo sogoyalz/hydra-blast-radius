@@ -131,20 +131,52 @@ function unwrap(cell) {
 // explicit ORDER BY.
 const PAGE_SIZE = 1000; // under the cap, so a short page reliably means "done"
 
-export async function runQueryPaged(query, parameters, maxRows = 200_000) {
+// Pages by SEEKING past the last key seen, not by offset.
+//
+// SKIP/LIMIT is unusable here, and not theoretically: measured. Taking page one
+// of a 1500-row result, inserting 800 rows, then taking page two at SKIP 1000
+// lost 528 rows that had been present the whole time and duplicated 260 others.
+// An insert lands somewhere in the ordering, every later row shifts right, and
+// the next offset steps straight over the ones that moved. Ordering the query
+// does not save it — the offset is still measured from a start that has grown.
+// For a tool whose entire claim is "here is everything exposed", quietly
+// dropping a third of the answer whenever someone ingests during a query is not
+// a tolerable failure.
+//
+// Seeking is immune to the same interleaving: a row inserted after the current
+// key is picked up by a later page, and one inserted before it was already
+// passed. A row present for the whole query is therefore never skipped.
+//
+// `template` must contain the marker {{SEEK}} where a WHERE clause can go, and
+// must already end with `ORDER BY <keyAlias>`. `keyExpr` is the ordered
+// expression as written in the MATCH (e.g. `d.name`); `keyAlias` is its
+// returned column. The key must be UNIQUE per row, or rows sharing a key on a
+// page boundary are lost — which is why the maintainer query, whose rows are
+// (maintainer, package) pairs, is paged per maintainer instead of as pairs.
+export async function runQueryPagedKeyset(template, keyExpr, keyAlias, parameters, maxPages = 500) {
+  if (!template.includes("{{SEEK}}")) {
+    throw new Error("runQueryPagedKeyset: template must contain a {{SEEK}} marker");
+  }
   const all = [];
-  for (let skip = 0; skip < maxRows; skip += PAGE_SIZE) {
-    const rows = await runQuery(`${query} SKIP ${skip} LIMIT ${PAGE_SIZE}`, parameters);
+  let last = null;
+  for (let page = 0; page < maxPages; page++) {
+    const seek = last === null ? "" : `WHERE ${keyExpr} > ${cypherString(last)}`;
+    const rows = await runQuery(
+      `${template.replace("{{SEEK}}", seek)} LIMIT ${PAGE_SIZE}`,
+      parameters
+    );
     all.push(...rows);
     if (rows.length < PAGE_SIZE) return all;
+    const nextKey = rows[rows.length - 1]?.[keyAlias];
+    // Without a usable key there is no way to resume, and continuing would
+    // silently repeat or skip. Stop loudly instead.
+    if (nextKey == null || nextKey === last) {
+      throw new Error(`runQueryPagedKeyset: cannot resume paging after key ${JSON.stringify(nextKey)}`);
+    }
+    last = nextKey;
   }
-  // Reaching here means every page came back full, so there is very probably
-  // more data and this result is short. Returning it would reintroduce exactly
-  // the silent truncation this function exists to remove, just at a much
-  // higher threshold — so it throws instead. Callers already treat a thrown
-  // query as a failed request rather than an empty answer.
   throw new Error(
-    `query exceeded ${maxRows} rows while paging; refusing to return a partial result: ${query.slice(0, 120)}`
+    `query exceeded ${maxPages * PAGE_SIZE} rows while paging; refusing to return a partial result`
   );
 }
 

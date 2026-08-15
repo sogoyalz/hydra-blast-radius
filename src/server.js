@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { blastRadiusWithHops } from "./blastRadius.js";
 import { findTyposquats } from "./typosquat.js";
 import { sharedMaintainerReach } from "./sharedMaintainers.js";
-import { runQuery, runQueryPaged, packageId } from "./hydra.js";
+import { runQuery, runQueryPagedKeyset, packageId } from "./hydra.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FRONTEND_DIR = join(__dirname, "..", "frontend");
@@ -62,8 +62,13 @@ function parseDepth(raw) {
 async function allIngestedPackageNames() {
   // Paged: past 1024 packages an unpaged query silently returns 1024, which
   // would quietly shrink the autocomplete list and, worse, hand the typosquat
-  // scan a partial view of the graph it reports as fully scanned.
-  const rows = await runQueryPaged("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+  // scan a partial view of the graph it reports as fully scanned. Seek-paged so
+  // an ingest running alongside the server cannot shift rows out of the result.
+  const rows = await runQueryPagedKeyset(
+    "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
+    "p.name",
+    "name"
+  );
   return rows.map((r) => r.name).filter(Boolean);
 }
 

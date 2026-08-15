@@ -13,25 +13,42 @@
 // Usage: node src/sharedMaintainers.js <package-name>
 
 import { pathToFileURL } from "node:url";
-import { runQuery, runQueryPaged, packageId } from "./hydra.js";
+import { runQuery, runQueryPagedKeyset, packageId, maintainerId } from "./hydra.js";
 
 // Returns [{ maintainer, packages: [...] }], excluding the target itself.
 export async function sharedMaintainers(name) {
-  // Paged: this returns one row per (maintainer, package) pair, so a
-  // widely-trusted publisher blows past the engine's silent 1024-row cap long
-  // before the package count does — and this traversal IS the project's
-  // headline finding, the reach a dependency scanner cannot see. Truncating it
-  // would under-report the credential blast radius with no indication.
-  const rows = await runQueryPaged(
-    `MATCH (target:Package {id: ${packageId(name)}})-[:MAINTAINED_BY]->(m:Maintainer)-[:MAINTAINS]->(sibling:Package) ` +
-    `RETURN m.name AS maintainer, sibling.name AS pkg`
+  // Two steps rather than one, and the reason is paging rather than taste.
+  //
+  // This has to be paged at all because it yields one row per (maintainer,
+  // package) pair, so a widely-trusted publisher passes the engine's silent
+  // 1024-row cap long before the package count does — and this traversal IS
+  // the project's headline finding, the reach a dependency scanner cannot see.
+  //
+  // But seek-paging needs a key that is unique per row, and neither column is:
+  // one package appears once per maintainer, one maintainer once per package.
+  // Seeking on either would drop the rows sharing a key with a page boundary.
+  // Fetching the maintainers first (there are a handful — four for
+  // `body-parser`, and the count is bounded by how many people can publish one
+  // package) makes each follow-up query single-keyed on a unique package name,
+  // which pages safely.
+  const maintainerRows = await runQuery(
+    `MATCH (target:Package {id: ${packageId(name)}})-[:MAINTAINED_BY]->(m:Maintainer) RETURN DISTINCT m.name AS maintainer`
   );
 
   const byMaintainer = new Map();
-  for (const row of rows) {
-    if (!row.maintainer || !row.pkg || row.pkg === name) continue;
-    if (!byMaintainer.has(row.maintainer)) byMaintainer.set(row.maintainer, new Set());
-    byMaintainer.get(row.maintainer).add(row.pkg);
+  for (const { maintainer } of maintainerRows) {
+    if (!maintainer) continue;
+    const rows = await runQueryPagedKeyset(
+      `MATCH (m:Maintainer {id: ${maintainerId(maintainer)}})-[:MAINTAINS]->(sibling:Package) {{SEEK}} ` +
+      `RETURN DISTINCT sibling.name AS pkg ORDER BY pkg`,
+      "sibling.name",
+      "pkg"
+    );
+    for (const row of rows) {
+      if (!row.pkg || row.pkg === name) continue;
+      if (!byMaintainer.has(maintainer)) byMaintainer.set(maintainer, new Set());
+      byMaintainer.get(maintainer).add(row.pkg);
+    }
   }
 
   return [...byMaintainer.entries()]

@@ -10,7 +10,7 @@
 // Usage: node src/blastRadius.js <package-name> [--depth=6]
 
 import { pathToFileURL } from "node:url";
-import { runQuery, runQueryPaged, runQueriesConcurrent, packageId } from "./hydra.js";
+import { runQuery, runQueryPagedKeyset, runQueriesConcurrent, packageId } from "./hydra.js";
 
 function parseArgs(argv) {
   const [name, ...rest] = argv;
@@ -28,14 +28,19 @@ function parseArgs(argv) {
 
 export async function blastRadius(name, depth = 6) {
   const id = packageId(name);
-  const query = `MATCH (target:Package {id: ${id}})-[:REQUIRED_BY*1..${depth}]->(dependent:Package) RETURN DISTINCT dependent.name AS name`;
-  // Paged, because the engine truncates any result at 1024 rows without
-  // saying so. This traversal is the authoritative answer to "what is exposed"
-  // and the fallback the native path defers to, so a silent cut here would
-  // under-report the blast radius on exactly the large graphs where the
-  // question matters most. Measured: a known 1500-package radius returned
-  // 1024 unpaged and all 1500 paged.
-  const rows = await runQueryPaged(query);
+  // Paged, because the engine truncates any result at 1024 rows without saying
+  // so. This traversal is the authoritative answer to "what is exposed" and the
+  // fallback the native path defers to, so a silent cut here would under-report
+  // the blast radius on exactly the large graphs where the question matters
+  // most. Measured: a known 1500-package radius returned 1024 unpaged.
+  //
+  // Seek-paged rather than offset-paged: package names are unique, and an
+  // ingest running against the same graph during the query would otherwise
+  // shift the offsets out from under it (measured at 528 rows lost).
+  const template =
+    `MATCH (target:Package {id: ${id}})-[:REQUIRED_BY*1..${depth}]->(dependent:Package) {{SEEK}} ` +
+    `RETURN DISTINCT dependent.name AS name ORDER BY name`;
+  const rows = await runQueryPagedKeyset(template, "dependent.name", "name");
   return rows.map((r) => r.name).filter(Boolean);
 }
 
