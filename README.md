@@ -34,7 +34,7 @@ The gap is not academic. On the demo graph:
 **The whole picture is one query.** The exposed set, every package's hop distance, and every edge between them all come back from a single call to HydraDB's native single-source path procedure:
 
 ```cypher
-CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], maxLen: 6, pathCount: 2000})
+CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], maxLen: 6, pathCount: 1024})
 YIELD path RETURN path
 ```
 
@@ -273,7 +273,7 @@ The blast-radius question is asked two ways against the same model, and both are
 The primary path is HydraDB's native single-source path procedure, which returns whole paths and so answers the exposure question and supplies the drawing in one round trip:
 
 ```cypher
-CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], maxLen: 6, pathCount: 2000})
+CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], maxLen: 6, pathCount: 1024})
 YIELD path RETURN path
 ```
 

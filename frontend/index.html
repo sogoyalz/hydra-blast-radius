@@ -500,6 +500,23 @@ function hopColor(hop) { return HOP_COLORS[hop] ?? HOP_FALLBACK; }
 // it without re-querying.
 let lastData = null;
 
+// What the viewer currently has selected, kept because a highlight is state
+// and the SVG holding it is not durable. render() rebuilds every node and
+// edge from scratch, so the `edge-hot`/`node-hot` classes a selection applies
+// are destroyed by any re-layout — while the sidebar text describing that
+// selection survives untouched. The result was a picture and a caption that
+// contradicted each other: the sidebar said "one compromised credential
+// reaches every highlighted node" over a graph with nothing highlighted.
+//
+// This was not an edge case. The ResizeObserver below fires once on observe
+// and again as the panel settles, so a deep link — which applies its
+// selection as soon as the response lands — had its highlight wiped ~120ms
+// later on every single load. Both documented deep links reproduced it 100%
+// of the time, which is why the README screenshots no longer matched the app.
+// Re-applying the selection at the end of render() makes the highlight
+// survive re-layout, on a deep link and on a window resize alike.
+let selection = null; // { kind: "maintainer" | "path", name }
+
 const svg = document.getElementById("graph");
 const ringsG = document.getElementById("rings");
 const edgesG = document.getElementById("edges");
@@ -1057,6 +1074,16 @@ function render(data, attempt = 0) {
     note.textContent = `+${credOmitted} more credential-reachable package(s) not drawn — see sidebar`;
     nodesG.appendChild(note);
   }
+
+  // Re-apply the current selection onto the freshly drawn elements. The
+  // classes it sets live on nodes and edges that were just replaced, so
+  // without this every re-layout silently drops the highlight and leaves the
+  // sidebar describing something the graph no longer shows. Neither of these
+  // calls re-enters render(), so this cannot loop.
+  if (selection) {
+    if (selection.kind === "maintainer") showMaintainer(selection.name);
+    else showPath(selection.name);
+  }
 }
 
 // Per-ring budgets keep any single ring from crowding itself, but they cannot
@@ -1140,6 +1167,11 @@ function clearHighlight() {
 // This is the "one stolen token, this much reach" view.
 function showMaintainer(name) {
   clearHighlight();
+  // Recorded before the early returns below, so that a selection which
+  // resolves to an explanation rather than a highlight still survives
+  // re-layout — otherwise a re-render would silently swap that explanation
+  // back for the generic "click any node" placeholder.
+  selection = { kind: "maintainer", name };
   const box = document.getElementById("path-result");
   const group = (lastData?.maintainers?.groups ?? []).find((g) => g.maintainer === name);
   if (!group) {
@@ -1171,6 +1203,7 @@ function showMaintainer(name) {
 
 function showPath(name) {
   clearHighlight();
+  selection = { kind: "path", name };
   const box = document.getElementById("path-result");
   if (!lastData) return;
 
@@ -1334,6 +1367,12 @@ async function computeBlastRadius() {
     if (!res.ok) throw new Error(data.error ?? "request failed");
 
     lastData = data;
+    // A new result invalidates whatever was selected against the old one:
+    // replaying a trace from the previous package onto this graph would
+    // highlight the wrong thing, or nothing at all. Cleared before render()
+    // so it does not re-apply, which also keeps the placeholder written just
+    // below from being clobbered by a stale selection's sidebar text.
+    selection = null;
     render(data);
     document.getElementById("path-result").innerHTML =
       `<span style="color:var(--muted)">Click any node in the graph to trace the exact
