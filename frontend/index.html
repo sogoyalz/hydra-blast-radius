@@ -103,6 +103,45 @@
   }
   svg { width: 100%; height: 100%; display: block; }
   .node circle { stroke: var(--bg); stroke-width: 2px; cursor: pointer; }
+  /* The hit disc is a target, not a mark — it must never paint or take a
+     stroke, only catch the pointer. */
+  .node circle.hit { stroke: none; pointer-events: all; }
+
+  /* Until now a node gave no sign it was interactive until you had already
+     clicked it. The only feedback was the browser's native tooltip, which
+     arrives after about a second — long enough to read as nothing happening.
+     Hover and keyboard focus now answer immediately, and share styling because
+     they mean the same thing: this is the node you are about to act on. */
+  .node { transition: opacity 120ms ease; }
+  .node:hover .dot,
+  .node:focus-visible .dot {
+    stroke: var(--text);
+    stroke-width: 2.5px;
+  }
+  .node:focus { outline: none; }
+  .node:focus-visible .hit {
+    stroke: var(--accent);
+    stroke-width: 2px;
+    stroke-dasharray: 3 3;
+  }
+  /* Crowded rings drop their labels, so hovering is the only way to read one
+     without clicking. Bring it back on hover, above its neighbours. */
+  .node:hover text,
+  .node:focus-visible text {
+    fill: var(--text);
+    font-weight: 700;
+  }
+  /* Dropped by the collision pass because something nearer the target already
+     claimed those pixels — hidden, not discarded, so hover or focus still
+     answers what this node is called. */
+  .node text.collided { display: none; }
+  .node:hover text.collided,
+  .node:focus-visible text.collided { display: block; }
+  /* Dim the rest of the graph while a node is hovered, so the thing under the
+     cursor separates from the mass behind it. Pointer events stay on so moving
+     between nodes does not flicker. */
+  #nodes:hover .node:not(:hover) { opacity: 0.45; }
+  #nodes:hover .node:not(:hover) text { opacity: 0.6; }
   .node text {
     fill: var(--text);
     font-size: 11px;
@@ -180,6 +219,22 @@
   .badge.medium { background: var(--hop1); color: #000; }
   .badge.low, .badge.coincidence { background: #2a3746; color: var(--muted); }
   #datalist-hint { font-size: 11px; color: var(--muted); }
+  /* Example shortcuts on the empty state. Styled as quiet secondary actions,
+     not as a second call-to-action competing with Compute. */
+  button.example {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 6px 10px;
+    border-radius: 999px;
+    margin: 0 6px 6px 0;
+    cursor: pointer;
+  }
+  button.example span { color: var(--muted); font-size: 11px; margin-left: 5px; }
+  button.example:hover { border-color: var(--accent); filter: none; }
+  button.example:hover span { color: var(--accent); }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.92em;
@@ -199,14 +254,17 @@
   @media (max-width: 700px) {
     main {
       grid-template-columns: 1fr;
-      grid-template-rows: 46vh auto;
+      grid-template-rows: 54vh auto;
       height: auto;
       min-height: calc(100vh - 65px);
     }
     #graph-panel {
       border-right: none;
       border-bottom: 1px solid var(--border);
-      height: 46vh;
+      /* A little more of the screen than before: the rings are radius-floored
+         on a phone, so the extra height goes straight into separating nodes
+         rather than into empty margin. */
+      height: 54vh;
     }
     #sidebar {
       overflow-y: visible;
@@ -267,7 +325,17 @@
   <div id="sidebar">
     <h2>Result</h2>
     <div id="summary">Enter a package above and compute its blast radius.
-      <div style="margin-top:10px;font-size:12px;color:var(--muted)">Models packages, not
+      <!-- Landing here with an empty input and a blank canvas, the first
+           question is "what do I type?" — and the interesting answers are
+           exactly the ones a newcomer has no way to guess. These are the three
+           the setup script recommends, one click each. -->
+      <div id="examples" style="margin-top:12px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:7px">Or start with one of these:</div>
+        <button class="example" data-pkg="body-parser" title="1 package exposed by dependencies, 36 once shared publish rights are counted">body-parser <span>36 vs 1</span></button>
+        <button class="example" data-pkg="qs" title="A package carrying real GHSA advisories, reached through express → body-parser → qs">qs <span>real CVEs</span></button>
+        <button class="example" data-pkg="debug" title="A deeper multi-hop dependency picture">debug <span>multi-hop</span></button>
+      </div>
+      <div style="margin-top:12px;font-size:12px;color:var(--muted)">Models packages, not
       versions — this answers "what's exposed" and "who shares publish rights", not
       "which version introduced it" or "who resolved the bad version while live".
       See the README's Status table for why.</div>
@@ -585,7 +653,18 @@ function render(data, attempt = 0) {
   // because circumference grows with hop: an outer ring genuinely fits more
   // names than the first one does. Suppressed labels cost nothing — the
   // <title> and the click-to-trace behaviour stay on every node.
-  const labelBudgetForHop = (hop) => Math.max(12, Math.round(12 * hop));
+  // How many labels a ring can carry is a question about its circumference in
+  // pixels, not about its hop number. A flat count per hop was wrong in both
+  // directions: it labelled a phone's cramped inner ring — 34px radius, five
+  // nodes, names overlapping each other and the dots — while leaving room
+  // unused on a wide desktop ring. Deriving the budget from the ring's actual
+  // perimeter divided by a typical label footprint makes the same rule fit both:
+  // labels thin out as the space shrinks and come back when it grows, and the
+  // relayout on resize re-evaluates it.
+  const LABEL_FOOTPRINT_PX = 92;
+  const labelBudgetForRing = (rx, ry) =>
+    Math.max(2, Math.floor((2 * Math.PI * Math.sqrt((rx * rx + ry * ry) / 2)) / LABEL_FOOTPRINT_PX));
+  const labelBudgetForHop = (hop) => labelBudgetForRing(hop * ringX, hop * ringY);
   const crowdedHops = new Set();
   for (const [hop, nodesAtHop] of byHop) {
     if (hop > 0 && nodesAtHop.length > labelBudgetForHop(hop)) crowdedHops.add(hop);
@@ -698,9 +777,24 @@ function render(data, attempt = 0) {
 
   for (const n of data.nodes) {
     const p = pos.get(n.name);
-    const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
+    const g = el("g", {
+      class: "node",
+      transform: `translate(${p.x},${p.y})`,
+      // Reachable and operable without a mouse. Every node is a real control —
+      // it traces a path — but until now only a click could reach it.
+      tabindex: "0",
+      role: "button",
+      "aria-label": `${n.name}, ${n.hop === 0 ? "the compromised package" : `${n.hop} hop${n.hop === 1 ? "" : "s"} away`}. Trace the path that exposes it.`,
+      "data-priority": String(n.hop),
+    });
     const radius = n.hop === 0 ? 10 : 6;
-    g.appendChild(el("circle", { r: radius, fill: hopColor(n.hop) }));
+    // An invisible disc wider than the dot it sits under. A 6px target is a
+    // small thing to hit deliberately, and missing one produced no feedback at
+    // all — the click landed on background and nothing happened, which reads as
+    // the graph being broken rather than as a miss. Drawn first so it sits
+    // beneath the visible node and never occludes it.
+    g.appendChild(el("circle", { class: "hit", r: Math.max(radius + 8, 14), fill: "transparent" }));
+    g.appendChild(el("circle", { class: "dot", r: radius, fill: hopColor(n.hop) }));
     // Exposed twice over: in the dependency tree AND in credential range.
     if (n.hop > 0 && reach.has(n.name)) {
       g.appendChild(el("circle", { class: "cred-halo", r: radius + 4 }));
@@ -737,6 +831,12 @@ function render(data, attempt = 0) {
     g.appendChild(title);
 
     g.addEventListener("click", () => showPath(n.name));
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault(); // Space would otherwise scroll the page
+        showPath(n.name);
+      }
+    });
     nodeEls.set(n.name, g);
     nodesG.appendChild(g);
   }
@@ -744,25 +844,50 @@ function render(data, attempt = 0) {
   // Maintainers. Drawn as squares because they are a genuinely different
   // vertex type in the graph, not another package — shape carries that, so
   // colour stays free to mean "how exposed".
+  const labelMaintainers = mpos.size <= labelBudgetForRing(maintainerLevel * ringX, maintainerLevel * ringY);
   for (const [name, p] of mpos) {
-    const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
-    g.appendChild(el("rect", { x: -5, y: -5, width: 10, height: 10, fill: "var(--maintainer)" }));
-    const dirX = Math.cos(p.angle);
-    const mText = labelText(name);
-    const mAnchor = dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle";
-    const label = el("text", {
-      x: dirX * 11 + horizontalShift(p.x + dirX * 11, mText, mAnchor, rect.width),
-      y: Math.sin(p.angle) * 11,
-      "text-anchor": mAnchor,
-      "dominant-baseline": Math.sin(p.angle) > 0.4 ? "hanging" : Math.sin(p.angle) < -0.4 ? "auto" : "middle",
-      fill: "var(--maintainer)",
+    const g = el("g", {
+      class: "node",
+      transform: `translate(${p.x},${p.y})`,
+      tabindex: "0",
+      role: "button",
+      "aria-label": `Maintainer ${name}. Highlight everything this credential can publish to.`,
+      "data-priority": "50",
     });
-    label.textContent = mText;
-    g.appendChild(label);
+    g.appendChild(el("circle", { class: "hit", r: 14, fill: "transparent" }));
+    g.appendChild(el("rect", { class: "dot", x: -5, y: -5, width: 10, height: 10, fill: "var(--maintainer)" }));
+    // Budgeted like the other rings. These sit just inside the credential ring,
+    // so on a phone a maintainer name and the package it publishes to were
+    // landing on the same few pixels.
+    if (labelMaintainers) {
+      const dirX = Math.cos(p.angle);
+      const dirY = Math.sin(p.angle);
+      const mText = labelText(name);
+      const mAnchor = dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle";
+      // Nudged perpendicular to its own radius. A maintainer sits directly
+      // inward of the packages it publishes to, so both labels radiate along
+      // nearly the same line and land on top of each other — which is how
+      // "tootallnate" and "ms" ended up sharing pixels. Stepping sideways off
+      // that line separates them without moving either node.
+      const perpX = -dirY * 9;
+      const perpY = dirX * 9;
+      const label = el("text", {
+        x: dirX * 11 + perpX + horizontalShift(p.x + dirX * 11 + perpX, mText, mAnchor, rect.width),
+        y: dirY * 11 + perpY,
+        "text-anchor": mAnchor,
+        "dominant-baseline": Math.sin(p.angle) > 0.4 ? "hanging" : Math.sin(p.angle) < -0.4 ? "auto" : "middle",
+        fill: "var(--maintainer)",
+      });
+      label.textContent = mText;
+      g.appendChild(label);
+    }
     const title = el("title", {});
     title.textContent = `${name} — can publish to ${data.target} and others; click to highlight`;
     g.appendChild(title);
     g.addEventListener("click", () => showMaintainer(name));
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showMaintainer(name); }
+    });
     maintainerEls.set(name, g);
     nodesG.appendChild(g);
   }
@@ -770,10 +895,20 @@ function render(data, attempt = 0) {
   // Packages reachable only through those credentials. Labels are suppressed
   // on a crowded ring — at this count the mass IS the message, and every
   // name is one hover or click away.
-  const labelCred = placed.size <= 14;
+  // Same perimeter rule the dependency rings use, so the credential ring thins
+  // out on a narrow screen instead of stacking names on top of each other.
+  const labelCred = hasCred && placed.size <= labelBudgetForRing(credLevel * ringX, credLevel * ringY);
   for (const [name, p] of credPos) {
-    const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
-    g.appendChild(el("circle", { r: 5, fill: "var(--danger)" }));
+    const g = el("g", {
+      class: "node",
+      transform: `translate(${p.x},${p.y})`,
+      tabindex: "0",
+      role: "button",
+      "aria-label": `${name}, reachable only through shared publish rights. Trace how.`,
+      "data-priority": "60",
+    });
+    g.appendChild(el("circle", { class: "hit", r: 14, fill: "transparent" }));
+    g.appendChild(el("circle", { class: "dot", r: 5, fill: "var(--danger)" }));
     if (labelCred) {
       const dirX = Math.cos(p.angle);
       const cText = labelText(name);
@@ -791,9 +926,14 @@ function render(data, attempt = 0) {
     title.textContent = `${name} — no dependency path; reachable via shared publish rights. Click to trace.`;
     g.appendChild(title);
     g.addEventListener("click", () => showPath(name));
+    g.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showPath(name); }
+    });
     nodeEls.set(name, g);
     nodesG.appendChild(g);
   }
+
+  hideCollidingLabels();
 
   // Truncation is never silent: a partial picture of a blast radius is the
   // one failure mode this tool cannot afford.
@@ -801,6 +941,38 @@ function render(data, attempt = 0) {
     const note = el("text", { x: 12, y: rect.height - 12, fill: "var(--muted)", "font-size": "11" });
     note.textContent = `+${credOmitted} more credential-reachable package(s) not drawn — see sidebar`;
     nodesG.appendChild(note);
+  }
+}
+
+// Per-ring budgets keep any single ring from crowding itself, but they cannot
+// see across rings — a label radiating outward from an inner ring reaches into
+// the next one, which is how "wasm-parser" and "wast-printer" ended up sharing
+// pixels while both rings were individually within budget. Rather than model
+// that geometry, this measures what was actually drawn and drops whichever
+// label loses.
+//
+// Greedy in priority order: the target first, then outward by hop, so when two
+// labels collide the one nearer the compromised package — the one carrying more
+// of the story — is the one that stays. Nothing is lost outright, since a
+// hidden label still comes back on hover or keyboard focus, and the full name
+// was always in the node's <title>.
+function hideCollidingLabels() {
+  const labels = [...nodesG.querySelectorAll(".node text")];
+  for (const l of labels) l.classList.remove("collided");
+  labels.sort(
+    (a, b) =>
+      Number(a.parentNode.dataset.priority ?? 99) - Number(b.parentNode.dataset.priority ?? 99)
+  );
+
+  const kept = [];
+  for (const label of labels) {
+    const r = label.getBoundingClientRect();
+    if (r.width === 0) continue; // not laid out; nothing to collide with
+    const hits = kept.some(
+      (k) => r.left < k.right && k.left < r.right && r.top < k.bottom && k.top < r.bottom
+    );
+    if (hits) label.classList.add("collided");
+    else kept.push(r);
   }
 }
 
@@ -1080,6 +1252,15 @@ async function computeBlastRadius() {
     goBtn.disabled = false;
   }
 }
+
+// Delegated because #summary is replaced wholesale on every result, which
+// would strip listeners bound to the buttons themselves.
+document.getElementById("sidebar").addEventListener("click", (e) => {
+  const btn = e.target.closest("button.example");
+  if (!btn) return;
+  pkgInput.value = btn.dataset.pkg;
+  computeBlastRadius();
+});
 
 goBtn.addEventListener("click", computeBlastRadius);
 pkgInput.addEventListener("keydown", (e) => { if (e.key === "Enter") computeBlastRadius(); });
