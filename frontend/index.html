@@ -452,6 +452,55 @@ async function loadTyposquats() {
 // count of what was left out is surfaced rather than silently dropped.
 const CRED_DRAW_CAP = 60;
 
+// Labels radiate outward from their node, so a long name on a node near the
+// left or right extreme of a ring runs straight off the panel and is chopped
+// mid-word by the wrapper's overflow:hidden. That is not a synthetic worry:
+// on the demo graph, a blast radius for @webassemblyjs/helper-api-error
+// clipped nine of its eleven labels, one of them by 137px, leaving fragments
+// like "bassemblyjs/leb128" and "s/wast-printer" on screen.
+//
+// Scoped names lose the scope first, because the segment after the slash is
+// the part that distinguishes one @webassemblyjs package from the next; the
+// scope is shared by all of them and carries almost no information here. The
+// untruncated name always stays in the node's <title>, so nothing is actually
+// lost — same bargain the crowded-ring rule makes.
+// Truncating alone does not stop the clipping, because whether a label fits
+// depends on where its node sits as much as on how long the name is: a
+// 22-character name on a node at the ring's right extreme still ran 121px past
+// the edge. This nudges a label back inside the panel when it would otherwise
+// cross the boundary, and returns 0 for the overwhelming majority that sit
+// comfortably inside. Width is estimated from the character count (~5.6px per
+// glyph at the 11px label size) because measuring for real would mean laying
+// out every label twice per render.
+// Slightly generous on both counts, deliberately. Labels are painted with a
+// 3px stroke halo under the glyphs (see .node text), so their visual box is
+// wider than the glyphs alone, and the font is proportional so a per-character
+// average is only ever approximate. Estimating a touch wide costs a few pixels
+// of position on the rare label that needs shifting; estimating narrow leaves
+// text cut off at the panel edge, which is the failure this exists to remove.
+const APPROX_CHAR_PX = 6.2;
+const EDGE_MARGIN_PX = 7;
+function horizontalShift(anchorX, text, anchor, panelWidth) {
+  const width = text.length * APPROX_CHAR_PX;
+  const left = anchor === "start" ? anchorX : anchor === "end" ? anchorX - width : anchorX - width / 2;
+  const right = left + width;
+  if (left < EDGE_MARGIN_PX) return EDGE_MARGIN_PX - left;
+  if (right > panelWidth - EDGE_MARGIN_PX) return panelWidth - EDGE_MARGIN_PX - right;
+  return 0;
+}
+
+const MAX_LABEL_CHARS = 22;
+function labelText(name) {
+  if (name.length <= MAX_LABEL_CHARS) return name;
+  const slash = name.indexOf("/");
+  if (slash > 0) {
+    const tail = name.slice(slash + 1);
+    if (tail.length + 2 <= MAX_LABEL_CHARS) return `…/${tail}`;
+    return `…/${tail.slice(0, MAX_LABEL_CHARS - 3)}…`;
+  }
+  return `${name.slice(0, MAX_LABEL_CHARS - 1)}…`;
+}
+
 function render(data, attempt = 0) {
   ringsG.innerHTML = "";
   edgesG.innerHTML = "";
@@ -664,6 +713,7 @@ function render(data, attempt = 0) {
     // follows the layout's own geometry and keeps them legible.
     // The target is always labelled; a crowded ring is not (see crowdedHops).
     if (n.hop === 0 || !crowdedHops.has(n.hop)) {
+      const text = labelText(n.name);
       let label;
       if (n.hop === 0) {
         label = el("text", { y: -(radius + 7), "text-anchor": "middle" });
@@ -671,14 +721,15 @@ function render(data, attempt = 0) {
         const dirX = Math.cos(p.angle);
         const dirY = Math.sin(p.angle);
         const gap = radius + 7;
+        const anchor = dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle";
         label = el("text", {
-          x: dirX * gap,
+          x: dirX * gap + horizontalShift(p.x + dirX * gap, text, anchor, rect.width),
           y: dirY * gap,
-          "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+          "text-anchor": anchor,
           "dominant-baseline": dirY > 0.4 ? "hanging" : dirY < -0.4 ? "auto" : "middle",
         });
       }
-      label.textContent = n.name;
+      label.textContent = text;
       g.appendChild(label);
     }
     const title = el("title", {});
@@ -697,14 +748,16 @@ function render(data, attempt = 0) {
     const g = el("g", { class: "node", transform: `translate(${p.x},${p.y})` });
     g.appendChild(el("rect", { x: -5, y: -5, width: 10, height: 10, fill: "var(--maintainer)" }));
     const dirX = Math.cos(p.angle);
+    const mText = labelText(name);
+    const mAnchor = dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle";
     const label = el("text", {
-      x: dirX * 11,
+      x: dirX * 11 + horizontalShift(p.x + dirX * 11, mText, mAnchor, rect.width),
       y: Math.sin(p.angle) * 11,
-      "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+      "text-anchor": mAnchor,
       "dominant-baseline": Math.sin(p.angle) > 0.4 ? "hanging" : Math.sin(p.angle) < -0.4 ? "auto" : "middle",
       fill: "var(--maintainer)",
     });
-    label.textContent = name;
+    label.textContent = mText;
     g.appendChild(label);
     const title = el("title", {});
     title.textContent = `${name} — can publish to ${data.target} and others; click to highlight`;
@@ -723,13 +776,15 @@ function render(data, attempt = 0) {
     g.appendChild(el("circle", { r: 5, fill: "var(--danger)" }));
     if (labelCred) {
       const dirX = Math.cos(p.angle);
+      const cText = labelText(name);
+      const cAnchor = dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle";
       const label = el("text", {
-        x: dirX * 10,
+        x: dirX * 10 + horizontalShift(p.x + dirX * 10, cText, cAnchor, rect.width),
         y: Math.sin(p.angle) * 10,
-        "text-anchor": dirX > 0.2 ? "start" : dirX < -0.2 ? "end" : "middle",
+        "text-anchor": cAnchor,
         "dominant-baseline": Math.sin(p.angle) > 0.4 ? "hanging" : Math.sin(p.angle) < -0.4 ? "auto" : "middle",
       });
-      label.textContent = name;
+      label.textContent = cText;
       g.appendChild(label);
     }
     const title = el("title", {});
