@@ -19,7 +19,19 @@ const HYDRA_CELL = process.env.HYDRA_CELL ?? "cell-0";
 // server that writes a partial JSON body and never ends it — with the timer
 // disarmed at header time that read never returns. Reading to completion here
 // keeps the abort signal live across the whole exchange.
-const DEFAULT_TIMEOUT_MS = 10_000;
+export const DEFAULT_TIMEOUT_MS = 10_000;
+
+// Traversals are given a longer budget than the flat 10s every query used to
+// share, because the two failure modes this bounds are not symmetric. A wedged
+// backend never answers, so a longer clock only delays *detecting* it. A
+// traversal that genuinely needs 13 seconds and gets killed at 10 is a correct
+// request turned into an error — measured: a target with ~2,300 direct
+// dependents timed out, so the blast radius most worth having was the one that
+// could not be computed. Slow-but-right beats fast-and-refused here.
+//
+// Overridable for anyone running against a slower machine or a much larger
+// graph than the demo's.
+export const TRAVERSAL_TIMEOUT_MS = Number(process.env.HYDRA_TRAVERSAL_TIMEOUT_MS) || 60_000;
 
 export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -66,18 +78,22 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TI
 //   * Only scalars bind. A list parameter comes back as "composite parameter
 //     $x is only supported as an UNWIND input", so relTypes has to be an
 //     inline list literal even though sourceNode must not be inline.
-export async function runQuery(query, parameters) {
+export async function runQuery(query, parameters, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const payload = { cell_id: HYDRA_CELL, query };
   if (parameters) payload.parameters = parameters;
-  const res = await fetchWithTimeout(`${HYDRA_HTTP_ADDR}/v1/graphs/${HYDRA_GRAPH}/query`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${HYDRA_TOKEN}`,
-      "X-Graph-Namespace": HYDRA_NAMESPACE,
-      "Content-Type": "application/json",
+  const res = await fetchWithTimeout(
+    `${HYDRA_HTTP_ADDR}/v1/graphs/${HYDRA_GRAPH}/query`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HYDRA_TOKEN}`,
+        "X-Graph-Namespace": HYDRA_NAMESPACE,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-  });
+    timeoutMs
+  );
 
   if (!res.ok) {
     const text = await res.text();
@@ -153,9 +169,35 @@ const PAGE_SIZE = 1000; // under the cap, so a short page reliably means "done"
 // returned column. The key must be UNIQUE per row, or rows sharing a key on a
 // page boundary are lost — which is why the maintainer query, whose rows are
 // (maintainer, package) pairs, is paged per maintainer instead of as pairs.
-export async function runQueryPagedKeyset(template, keyExpr, keyAlias, parameters, maxPages = 500) {
+// `firstPageTimeoutMs` bounds only the first page; every page after it gets the
+// full traversal budget. That split removes a real conflict rather than
+// splitting the difference on it. A short clock everywhere refuses legitimately
+// slow work on a big graph; a long clock everywhere means a wedged container
+// sits silent for a minute before anyone hears about it — and endpoints like
+// /api/packages have no cheap existence check in front of them to notice
+// first, so their opening page IS the liveness probe. Once that page returns,
+// the backend has proven it is answering, and there is nothing left to detect:
+// later pages are just work, and get waited on.
+export async function runQueryPagedKeyset(
+  template,
+  keyExpr,
+  keyAlias,
+  parameters,
+  maxPages = 500,
+  firstPageTimeoutMs = TRAVERSAL_TIMEOUT_MS
+) {
   if (!template.includes("{{SEEK}}")) {
     throw new Error("runQueryPagedKeyset: template must contain a {{SEEK}} marker");
+  }
+  // The contract was documented and unenforced, which is the same as
+  // unenforced. A template arriving with its own paging clause would have the
+  // pager's LIMIT appended after it and silently return the wrong rows, and
+  // nothing would look broken — the exact shape of failure this whole function
+  // exists to eliminate. Cheaper to refuse it than to debug it later.
+  if (/\b(SKIP|LIMIT)\b/i.test(template)) {
+    throw new Error(
+      "runQueryPagedKeyset: template must not contain its own SKIP/LIMIT — the pager adds them"
+    );
   }
   const all = [];
   let last = null;
@@ -163,7 +205,8 @@ export async function runQueryPagedKeyset(template, keyExpr, keyAlias, parameter
     const seek = last === null ? "" : `WHERE ${keyExpr} > ${cypherString(last)}`;
     const rows = await runQuery(
       `${template.replace("{{SEEK}}", seek)} LIMIT ${PAGE_SIZE}`,
-      parameters
+      parameters,
+      page === 0 ? firstPageTimeoutMs : TRAVERSAL_TIMEOUT_MS
     );
     all.push(...rows);
     if (rows.length < PAGE_SIZE) return all;

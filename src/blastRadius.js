@@ -10,7 +10,13 @@
 // Usage: node src/blastRadius.js <package-name> [--depth=6]
 
 import { pathToFileURL } from "node:url";
-import { runQuery, runQueryPagedKeyset, runQueriesConcurrent, packageId } from "./hydra.js";
+import {
+  runQuery,
+  runQueryPagedKeyset,
+  runQueriesConcurrent,
+  packageId,
+  TRAVERSAL_TIMEOUT_MS,
+} from "./hydra.js";
 
 function parseArgs(argv) {
   const [name, ...rest] = argv;
@@ -82,10 +88,14 @@ export async function blastRadiusNative(name, maxDepth = 6) {
   const start = Date.now();
   // relTypes must be an inline literal and sourceNode must be a bound
   // parameter — see the note on runQuery() in hydra.js.
+  // Traversal budget, not the default one: this enumerates paths, so its cost
+  // grows with graph density and it is exactly the query that outgrows a 10s
+  // clock first.
   const rows = await runQuery(
     `CALL algo.SSpaths({sourceNode: $sourceNode, relTypes: ["REQUIRED_BY"], ` +
       `maxLen: ${maxDepth}, pathCount: ${PATH_COUNT}}) YIELD path RETURN path`,
-    { sourceNode: packageId(name) }
+    { sourceNode: packageId(name) },
+    TRAVERSAL_TIMEOUT_MS
   );
   const coreQueryMs = Date.now() - start;
 

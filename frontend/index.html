@@ -1035,7 +1035,14 @@ async function computeBlastRadius() {
   goBtn.disabled = true;
 
   try {
-    const res = await fetchWithTimeout(`/api/blast-radius?name=${encodeURIComponent(name)}&depth=${depth}`, 25_000);
+    // Longer than the server's own worst case on purpose. A blast radius over
+    // a few thousand dependents legitimately takes over a minute, and a client
+    // that gave up at 25s reported a failure for a request that was still
+    // succeeding — the browser contradicting the server about what happened.
+    // Waiting this long is not the usual cost of a mistake either: if HydraDB
+    // is unreachable, the endpoint's existence check fails on the short budget
+    // and a 503 comes back in about ten seconds regardless.
+    const res = await fetchWithTimeout(`/api/blast-radius?name=${encodeURIComponent(name)}&depth=${depth}`, 180_000);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? "request failed");
 

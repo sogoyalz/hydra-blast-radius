@@ -7,11 +7,11 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { blastRadiusWithHops } from "./blastRadius.js";
 import { findTyposquats } from "./typosquat.js";
 import { sharedMaintainerReach } from "./sharedMaintainers.js";
-import { runQuery, runQueryPagedKeyset, packageId } from "./hydra.js";
+import { runQuery, runQueryPagedKeyset, packageId, DEFAULT_TIMEOUT_MS } from "./hydra.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FRONTEND_DIR = join(__dirname, "..", "frontend");
@@ -64,10 +64,18 @@ async function allIngestedPackageNames() {
   // would quietly shrink the autocomplete list and, worse, hand the typosquat
   // scan a partial view of the graph it reports as fully scanned. Seek-paged so
   // an ingest running alongside the server cannot shift rows out of the result.
+  // Each page is a flat label scan rather than a traversal, so it keeps the
+  // short per-query budget. That matters beyond speed: this endpoint has no
+  // cheap existence check in front of it the way /api/blast-radius does, so its
+  // first page IS the liveness probe — on the traversal budget a wedged
+  // container took 60s to produce a 503 instead of 10.
   const rows = await runQueryPagedKeyset(
     "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
     "p.name",
-    "name"
+    "name",
+    undefined,
+    500,
+    DEFAULT_TIMEOUT_MS
   );
   return rows.map((r) => r.name).filter(Boolean);
 }
@@ -268,6 +276,13 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`Blast radius demo running at http://127.0.0.1:${port}`);
-});
+// The same entry-point guard every other CLI file here carries. Without it,
+// importing this module to reach a helper binds the port as a side effect —
+// which happened while testing, producing an EADDRINUSE from an import that
+// was never meant to start anything. Running it directly is unaffected:
+// setup.sh's `exec node src/server.js` still matches.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  server.listen(port, () => {
+    console.log(`Blast radius demo running at http://127.0.0.1:${port}`);
+  });
+}
