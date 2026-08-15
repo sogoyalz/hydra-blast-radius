@@ -225,6 +225,19 @@ const server = createServer(async (req, res) => {
     // Inside the try: a malformed Host header makes `new URL` throw, and an
     // uncaught throw in an async request handler takes the whole process down.
     const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
+
+    // Everything here reads; nothing this server exposes creates, changes or
+    // deletes anything. The method was simply never inspected, so DELETE and
+    // PUT against /api/packages answered 200 as cheerfully as GET — which
+    // misrepresents the endpoint as accepting a write it silently ignored, and
+    // left TRACE answering too. HEAD is allowed alongside GET because Node
+    // suppresses the body for it on its own.
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.writeHead(405, { "Content-Type": "application/json", Allow: "GET, HEAD" });
+      res.end(JSON.stringify({ error: `${req.method} is not supported; this API is read-only` }));
+      return;
+    }
+
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
     } else {

@@ -800,7 +800,16 @@ function showMaintainer(name) {
   clearHighlight();
   const box = document.getElementById("path-result");
   const group = (lastData?.maintainers?.groups ?? []).find((g) => g.maintainer === name);
-  if (!group) return;
+  if (!group) {
+    // Reached from a hand-edited ?maintainer= that names nobody holding
+    // publish rights here. Returning silently cleared the highlight and left
+    // the default "click any node" placeholder, so the link looked like it had
+    // simply been ignored.
+    box.innerHTML = `<span style="color:var(--muted)">No maintainer named
+      <strong>${esc(name)}</strong> holds publish rights to
+      <strong>${esc(lastData?.target ?? "this package")}</strong>.</span>`;
+    return;
+  }
 
   maintainerEls.get(name)?.classList.add("node-hot");
   nodeEls.get(lastData.target)?.classList.add("node-hot");
@@ -849,9 +858,19 @@ function showPath(name) {
         dependency edge — a dependency scanner reports it as unaffected. It is exposed
         because ${via.length === 1 ? "this credential can" : `these ${via.length} credentials can each`}
         publish to both it and <strong>${esc(lastData.target)}</strong>.${chains}`;
-    } else {
+    } else if (name === lastData.target) {
       box.innerHTML = `<span style="color:var(--muted)">${esc(name)} is the target.</span>`;
       nodeEls.get(name)?.classList.add("node-hot");
+    } else {
+      // Neither channel explains this name, and it is not the target either —
+      // so it is simply not in this blast radius (a hand-edited ?trace=, or a
+      // package from a different query). This branch used to fall in with the
+      // target case and announce "<name> is the target", which was a plainly
+      // false statement about an unrelated package. Saying nothing would be
+      // better than that; saying the true thing is better still.
+      box.innerHTML = `<span style="color:var(--muted)"><strong>${esc(name)}</strong> is not in
+        the blast radius of <strong>${esc(lastData.target)}</strong> — no dependency path and
+        no shared publish rights connect them.</span>`;
     }
     return;
   }
