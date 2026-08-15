@@ -7,7 +7,11 @@
 import { pathToFileURL } from "node:url";
 import { runQuery, cypherString, packageId, maintainerId, fetchWithTimeout } from "./hydra.js";
 
-const REGISTRY = "https://registry.npmjs.org";
+// Overridable so the crawl can be pointed at a registry mirror or a private
+// registry, and so failure modes (5xx midway, malformed JSON, a stalled
+// response) can be exercised against a local stub rather than by waiting for
+// npm to have a bad day.
+const REGISTRY = process.env.NPM_REGISTRY ?? "https://registry.npmjs.org";
 const CRAWL_CONCURRENCY = 8;
 const WRITE_CONCURRENCY = 16;
 
@@ -56,7 +60,14 @@ async function fetchManifest(name) {
   // callers already treat a thrown error as "skip this package" (see the
   // try/catch around fetchManifest() in crawl() below).
   const res = await fetchWithTimeout(registryUrl(name), {}, 10_000);
-  if (!res.ok) return null; // unpublished, deprecated-and-removed, private, etc. — skip
+  // 404 is a real answer: the package is unpublished, removed, or private, and
+  // re-running will not change it. Anything else — 5xx, a rate limit, a
+  // truncated body — is the registry failing to answer a question that has an
+  // answer, and the crawl is missing a subtree it should have had. The two are
+  // separated so crawl() can report them differently: one is information about
+  // npm, the other is a reason to run ingestion again.
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`registry returned ${res.status}`);
   const manifest = await res.json();
   return {
     dependencies: {
@@ -99,6 +110,8 @@ export async function crawl(root, maxDepth, maxNodes) {
   const visited = new Set([root]);
   const edges = []; // {from, to} — both endpoints always in `visited`
   const maintainedBy = []; // {pkg, maintainer}
+  const notFound = []; // 404 from the registry — a real answer, not a failure
+  const unresolved = []; // {name, reason} — the registry did not answer
   let frontier = [{ name: root, depth: 0 }];
   let truncated = false;
 
@@ -110,7 +123,13 @@ export async function crawl(root, maxDepth, maxNodes) {
       let manifest;
       try {
         manifest = await fetchManifest(node.name);
-      } catch {
+        // Distinguished from a fetch failure: 404 means npm answered.
+        if (!manifest) notFound.push(node.name);
+      } catch (err) {
+        // Swallowing this silently left the crawl short a whole subtree while
+        // still printing "Done." — the same under-reporting the --max-nodes
+        // cap is careful to announce, arrived at by a different route.
+        unresolved.push({ name: node.name, reason: err.message });
         manifest = null;
       }
       return { node, manifest };
@@ -147,6 +166,8 @@ export async function crawl(root, maxDepth, maxNodes) {
     edges,
     maintainedBy: maintainedBy.filter((m) => visited.has(m.pkg)),
     truncated,
+    notFound,
+    unresolved,
   };
 }
 
@@ -228,7 +249,7 @@ async function main() {
   console.log(`Crawling npm dependency graph from "${root}" (depth=${depth}, maxNodes=${maxNodes})`);
 
   const start = Date.now();
-  const { nodes, edges, maintainedBy, truncated } = await crawl(root, depth, maxNodes);
+  const { nodes, edges, maintainedBy, truncated, notFound, unresolved } = await crawl(root, depth, maxNodes);
   const distinctMaintainers = new Set(maintainedBy.map((m) => m.maintainer)).size;
   console.log(
     `Discovered ${nodes.size} packages, ${edges.length} DEPENDS_ON edges and ` +
@@ -239,6 +260,28 @@ async function main() {
     console.log(
       `NOTE: hit the --max-nodes=${maxNodes} cap, so this crawl is partial. Blast-radius\n` +
       `      results over this graph are a lower bound. Raise --max-nodes for full coverage.`
+    );
+  }
+
+  // A package whose manifest never arrived takes its whole subtree with it,
+  // which makes the graph incomplete in exactly the way the --max-nodes cap
+  // does. It used to pass in silence, under a closing "Done.".
+  if (unresolved.length > 0) {
+    console.log(
+      `NOTE: ${unresolved.length} package(s) could not be fetched from the registry, so their\n` +
+      `      dependencies are missing and this crawl is a lower bound. This is usually\n` +
+      `      transient (rate limiting, a 5xx, a timeout) — re-run to fill the gaps:`
+    );
+    for (const u of unresolved.slice(0, 5)) console.log(`        ${u.name} — ${u.reason}`);
+    if (unresolved.length > 5) console.log(`        ...and ${unresolved.length - 5} more`);
+  }
+
+  // Separate, and only a footnote: 404 is the registry answering. Nothing to
+  // re-run for.
+  if (notFound.length > 0) {
+    console.log(
+      `NOTE: ${notFound.length} package(s) are not published (404) and were skipped: ` +
+      `${notFound.slice(0, 5).join(", ")}${notFound.length > 5 ? ", ..." : ""}`
     );
   }
 
