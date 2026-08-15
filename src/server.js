@@ -77,7 +77,22 @@ function sendJson(res, status, body) {
 // carries any query string ("/?x=1"), which turns into a bogus filename
 // and 404s the index page.
 async function serveStatic(pathname, res) {
-  const path = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  let path;
+  if (pathname === "/") {
+    path = "/index.html";
+  } else {
+    try {
+      path = decodeURIComponent(pathname);
+    } catch {
+      // decodeURIComponent throws URIError on a malformed escape ("/%",
+      // "/%zz"). Letting that reach the generic handler reported a client's
+      // bad URL as a 500 *server* error and logged a stack trace for it. A
+      // path that cannot be decoded names no file, which is a 404.
+      res.writeHead(404);
+      res.end("Not found");
+      return;
+    }
+  }
   const filePath = join(FRONTEND_DIR, path);
   // Boundary compare, not a bare prefix: `startsWith(FRONTEND_DIR)` alone would
   // also match a sibling directory like `<repo>/frontend-notes`. Require the

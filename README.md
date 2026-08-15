@@ -178,7 +178,9 @@ Targets are chosen to make the table say something. Ranking purely by in-degree 
 
 **What this proves, and what it does not.** It is a correctness gate on the ingest → store → traverse round trip: it answers *"does HydraDB return exactly the set that is actually reachable in the graph we wrote."* It is **not** a measure of vulnerability-detection accuracy against OSV/GHSA. The ground truth is a BFS over the same edge list that was just written, so the score can only drop if ingestion or traversal is broken — which makes it a strong regression test and a deliberately weak accuracy claim. Measuring true detection accuracy needs the organizers' held-out advisory set, which entrants don't have.
 
-Run it against a **freshly reset** database: HydraDB accumulates everything previously ingested (correct behavior for a real ecosystem graph — more history means more complete answers), but the in-memory ground truth only knows the current crawl, so extra correct matches from earlier ingests would read as false precision loss.
+Run it against a database holding **nothing but this crawl** — `./setup.sh --fresh --no-ingest`, then the command above. HydraDB accumulates everything previously ingested (correct behavior for a real ecosystem graph — more history means more complete answers), but the in-memory ground truth only knows the current crawl, so correct matches from earlier ingests would read as precision loss.
+
+Note that a plain `./setup.sh --fresh` is *not* enough, which is why `--no-ingest` exists: `--fresh` reloads the 120-package demo graph, and the eval then counts those (correctly) as prior knowledge. Run without it and the table still passes — recall stays 1.00 and nothing inside the crawl is contradicted — but the precision column reads below 1.00 and the run says exactly how many packages came from an earlier ingest.
 
 ### Validation against an independent source
 

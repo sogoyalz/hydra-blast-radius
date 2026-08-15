@@ -275,7 +275,9 @@ async function main() {
       `       The precision column is below 1.00 only because this database already held other\n` +
       `       ingests: ${priorTotal} returned package(s) are real dependents from an earlier crawl that\n` +
       `       this run's in-memory ground truth cannot know about — correct answers scored as\n` +
-      `       false positives. Run ./setup.sh --fresh first for a clean 1.00/1.00 table.\n\n` +
+      `       false positives. For a clean 1.00/1.00 table the graph has to hold nothing but\n` +
+      `       this crawl: ./setup.sh --fresh --no-ingest, then re-run. (Plain --fresh reloads\n` +
+      `       the demo graph, which this eval then correctly counts as prior knowledge.)\n\n` +
       `       This gates the ingest -> store -> traverse round trip; it is not a\n` +
       `       vulnerability-detection accuracy score (see the note at the top of this file).`
     );

@@ -18,11 +18,34 @@ CONTAINER=hydradb
 PORT=${PORT:-8787}
 DATA_DIR="$PWD/hydradb-data"
 TOKEN='local-development-token-32-bytes'
-FRESH=0
-[[ "${1:-}" == "--fresh" ]] && FRESH=1
-
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 fail() { printf '\n\033[31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
+
+# Every argument is read, in any order, and anything unrecognised stops the
+# run. Testing only "$1" meant `./setup.sh --no-ingest --fresh` quietly ignored
+# --fresh, and a typo like `--fesh` quietly did a normal run — both silently
+# doing something other than what was asked.
+FRESH=0
+NO_INGEST=0
+for arg in "$@"; do
+  case "$arg" in
+    --fresh) FRESH=1 ;;
+    # Leaves the database empty. The eval's precision column only reaches 1.00
+    # against a graph holding nothing but its own crawl, and a plain --fresh
+    # run does not give you that — it reloads the 120-package demo graph, which
+    # the eval then correctly counts as prior knowledge. This is how to get the
+    # clean table the README shows.
+    --no-ingest) NO_INGEST=1 ;;
+    -h|--help)
+      printf 'Usage: ./setup.sh [--fresh] [--no-ingest]\n\n'
+      printf '  --fresh      wipe the database and start over\n'
+      printf '  --no-ingest  skip loading the demo graph (leaves it empty;\n'
+      printf '               use with --fresh to reproduce the eval table)\n'
+      exit 0 ;;
+    *) fail "Unknown option: $arg
+       Usage: ./setup.sh [--fresh] [--no-ingest]   (--help for details)" ;;
+  esac
+done
 
 # ---------------------------------------------------------------- prereqs
 command -v docker >/dev/null || fail "docker not found. Install Docker Desktop, or on macOS: brew install colima docker && colima start"
@@ -121,7 +144,20 @@ import("./src/hydra.js").then(async ({ runQuery }) => {
 }).catch(() => console.log(0));
 ' 2>/dev/null || echo 0)
 
-if [[ "${ALREADY:-0}" -gt 20 ]]; then
+if [[ $NO_INGEST -eq 1 ]]; then
+  step "Skipping ingestion (--no-ingest) — the graph holds ${ALREADY:-0} package(s)"
+  cat <<'EOF'
+
+  The database is empty, which is what the correctness eval needs to show a
+  clean precision column — it ingests its own crawl and compares against it,
+  so anything already in the graph counts (correctly) as prior knowledge.
+
+    node src/eval.js koa --depth=3 --max-nodes=200
+
+  Run ./setup.sh afterwards to load the demo graph and start the UI.
+EOF
+  exit 0
+elif [[ "${ALREADY:-0}" -gt 20 ]]; then
   step "Graph already loaded (${ALREADY} packages) — skipping ingestion"
 else
   step "Ingesting a real npm dependency graph (this hits the public npm registry)"
@@ -168,7 +204,7 @@ cat <<EOF
     node src/blastRadius.js qs
     node src/sharedMaintainers.js body-parser
     node src/typosquat.js
-    node src/eval.js koa --depth=3 --max-nodes=200   # run after ./setup.sh --fresh
+    node src/eval.js koa --depth=3 --max-nodes=200   # clean table: ./setup.sh --fresh --no-ingest first
 
   Ctrl-C stops the server (HydraDB keeps running; 'docker rm -f hydradb' stops it).
 
