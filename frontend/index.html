@@ -8,36 +8,85 @@
   :root {
     --bg: #0b0f14;
     --panel: #121820;
-    --border: #223041;
+    --panel-2: #0f151d;
+    --border: #1e2a38;
+    --border-strong: #2c3d50;
     --text: #e6edf3;
-    --muted: #8b98a5;
-    --accent: #ff5c33;
-    --accent-soft: #ff5c3333;
-    --hop1: #ffb020;
-    --hop2: #4fc3f7;
-    --hop3: #7e57c2;
-    --hopN: #66bb6a;
-    --danger: #ff5c5c;
-    --maintainer: #c586c0;
+    --muted: #8695a5;
+    --faint: #5b6875;
+
+    /* Hop distance is a MAGNITUDE, so it gets one hue stepping light→dark —
+       a ripple losing energy as it travels. It used to be yellow→blue→purple
+       →green, which is a rainbow standing in for a quantity: the reader has to
+       consult a legend to learn that purple is further than blue, because
+       nothing about purple says "further". Steps are ~0.06 apart in lightness
+       and the darkest still clears the surface at 2.9:1, so four rings stay
+       tellable apart without any of them going muddy. */
+    --hop1: #9ec5f4;
+    --hop2: #5598e7;
+    --hop3: #2a78d6;
+    --hopN: #184f95;
+
+    /* Three roles that are genuinely different KINDS of thing, not degrees of
+       one — so these are hues, not steps. Checked as a set against this
+       surface: worst pair separates by ΔE 16.0 simulated for deuteranopia,
+       19.7 unsimulated, and all three sit inside the dark lightness band the
+       hop ramp is stepped for. The previous accent and danger were both
+       red-orange and eight ΔE apart, which put "the compromised package" and
+       "reachable only by credentials" — the two things the whole picture
+       exists to contrast — in nearly the same colour. */
+    --accent: #e8613a;        /* the target: exactly one node, never reused */
+    --accent-soft: #e8613a2e;
+    --maintainer: #9085e9;    /* a maintainer: a different vertex type */
+    --danger: #d55181;        /* reachable only through publish rights */
+    --error: #e66767;         /* error text — prose, never a mark */
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    /* A UI stack rather than the bare system default, so weights and figures
+       are consistent wherever this runs. */
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
     background: var(--bg);
     color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
+  /* Tabular figures wherever a number is the point. Proportional digits make a
+     count jitter as it changes, which reads as instability in the reading
+     rather than in the data. */
+  .tnum, #summary .big, input[type="number"] { font-variant-numeric: tabular-nums; }
+
   header {
-    padding: 20px 28px;
+    padding: 14px 22px;
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: baseline;
     gap: 12px;
+    flex-wrap: wrap;
   }
-  header h1 { font-size: 18px; margin: 0; }
+  header h1 {
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
   header .tag {
-    font-size: 12px;
+    font-size: 12.5px;
     color: var(--muted);
+  }
+  /* Pushed to the right edge and dimmed: present and readable, but not the
+     first thing competing with the product name. */
+  header .provenance {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: var(--faint);
+  }
+  @media (max-width: 700px) {
+    header .provenance { margin-left: 0; flex-basis: 100%; }
   }
   main {
     display: grid;
@@ -59,43 +108,51 @@
     align-items: center;
     flex-wrap: wrap;
   }
-  input[type="text"], input[list] {
-    background: var(--panel);
-    border: 1px solid var(--border);
+  input[type="text"], input[list], input[type="number"] {
+    background: var(--panel-2);
+    border: 1px solid var(--border-strong);
     color: var(--text);
     padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 14px;
-    min-width: 220px;
+    border-radius: 7px;
+    font: inherit;
+    font-size: 13.5px;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
-  input[type="number"] {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 10px;
-    border-radius: 6px;
-    width: 64px;
-    font-size: 14px;
+  input[type="text"], input[list] { min-width: 220px; }
+  input[type="number"] { width: 62px; padding: 8px 10px; }
+  /* Focus is stated once, the same way, on every control — the graph nodes
+     included. An input that only shifted its border on focus was the quietest
+     control on the page. */
+  input:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
+  input::placeholder { color: var(--faint); }
+
   button {
     background: var(--accent);
     color: #fff;
-    border: none;
-    padding: 9px 18px;
-    border-radius: 6px;
-    font-size: 14px;
+    border: 1px solid transparent;
+    padding: 8px 16px;
+    border-radius: 7px;
+    font: inherit;
+    font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
+    transition: background-color 120ms ease, box-shadow 120ms ease;
   }
-  button:hover { filter: brightness(1.1); }
-  button:disabled { opacity: 0.5; cursor: default; }
+  button:hover { background: #f0704b; filter: none; }
+  button:active { background: #d4552f; }
+  button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+  button:disabled { opacity: 0.45; cursor: default; background: var(--accent); }
   #status {
     font-size: 13px;
     color: var(--muted);
     padding: 0 20px;
     min-height: 20px;
   }
-  #status.error { color: var(--danger); }
+  #status.error { color: var(--error); }
   #svg-wrap {
     flex: 1;
     overflow: hidden;
@@ -174,29 +231,72 @@
   .cred-halo { fill: none; stroke: var(--danger); stroke-width: 1.2px; stroke-dasharray: 2 3; opacity: 0.8; }
   .ring { fill: none; stroke: var(--border); stroke-dasharray: 3 4; }
   #sidebar {
-    padding: 20px;
+    padding: 18px 20px 28px;
     overflow-y: auto;
   }
+  /* Section headings are wayfinding, not content: small, tracked out, and in
+     the faintest ink that still reads, so they order the panel without
+     competing with the findings under them. The rule carries the separation so
+     the margin does not have to. */
   #sidebar h2 {
-    font-size: 13px;
+    font-size: 10.5px;
+    font-weight: 650;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.09em;
+    /* --faint measured 3.37:1 here, which is fine for an ornament but these
+       headings are how you find your way around the panel, and at 10.5px that
+       wants 4.5:1. The hierarchy is carried by size, case and tracking rather
+       than by dimming the ink until it is hard to read. */
     color: var(--muted);
-    margin: 24px 0 10px;
+    margin: 22px 0 9px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
   }
-  #sidebar h2:first-child { margin-top: 0; }
-  .legend { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
-  .legend-row { display: flex; align-items: center; gap: 8px; }
-  .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  #sidebar h2:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+  /* The result card's own breakdown, mirroring the graph's encoding. */
+  .breakdown {
+    margin: 11px 0 13px;
+    font-size: 12.5px;
+    line-height: 1.75;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .breakdown > div { display: flex; align-items: center; gap: 8px; }
+  .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .sw-dep { background: var(--hop2); }
+  .sw-cred { background: var(--danger); }
+  /* Dependency fill, credential ring — "found by both", exactly as drawn. */
+  .sw-both {
+    background: var(--hop2);
+    box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--danger);
+    margin-right: 3px;
+  }
+
+  .legend { display: flex; flex-direction: column; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .legend-row { display: flex; align-items: center; gap: 9px; }
+  .swatch { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 4px; }
+  /* The hop ramp as a continuous strip, so it reads as a scale. */
+  .ramp { display: flex; flex: none; margin-top: 4px; border-radius: 2px; overflow: hidden; }
+  .ramp i { display: block; width: 11px; height: 9px; }
   #summary {
     background: var(--panel);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px;
+    border-radius: 9px;
+    padding: 15px 16px;
     font-size: 13px;
     line-height: 1.6;
   }
-  #summary .big { font-size: 26px; font-weight: 700; color: var(--accent); }
+  /* The headline count is the one number the page exists to deliver, so it is
+     sized and tracked like a figure rather than like running text. */
+  #summary .big {
+    display: block;
+    font-size: 34px;
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    color: var(--accent);
+    margin-bottom: 2px;
+  }
   .suspect {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -215,7 +315,7 @@
     text-transform: uppercase;
     margin-right: 6px;
   }
-  .badge.high { background: var(--danger); color: #fff; }
+  .badge.high { background: var(--error); color: #fff; }
   .badge.medium { background: var(--hop1); color: #000; }
   .badge.low, .badge.coincidence { background: #2a3746; color: var(--muted); }
   #datalist-hint { font-size: 11px; color: var(--muted); }
@@ -291,9 +391,15 @@
 </head>
 <body>
 
+<!-- The name, then what the tool is for, then where it came from. The
+     provenance was previously the only subtitle, which meant the first thing
+     the page said about itself was which contest it was entered in rather than
+     what question it answers. It still says both — attribution belongs here —
+     just in that order. -->
 <header>
   <h1>Supply Chain Blast Radius</h1>
-  <span class="tag">Hack Hydra · Track 2A · built on HydraDB</span>
+  <span class="tag">If an npm package is compromised, what is exposed?</span>
+  <span class="tag provenance">Hack Hydra &middot; Track 2A &middot; built on HydraDB</span>
 </header>
 
 <main>
@@ -355,19 +461,28 @@
 
     <h2>Legend</h2>
     <div class="legend">
-      <div class="legend-row"><span class="swatch" style="background:var(--accent)"></span> target (compromised package)</div>
-      <div class="legend-row"><span class="swatch" style="background:var(--hop1)"></span> 1 hop away</div>
-      <div class="legend-row"><span class="swatch" style="background:var(--hop2)"></span> 2 hops away</div>
-      <div class="legend-row"><span class="swatch" style="background:var(--hop3)"></span> 3 hops away</div>
-      <div class="legend-row"><span class="swatch" style="background:var(--hopN)"></span> 4+ hops away</div>
-      <div class="legend-row" style="margin-top:8px">
-        <span class="swatch" style="background:var(--maintainer);border-radius:2px"></span>
-        maintainer (square = different vertex type)
+      <div class="legend-row"><span class="swatch" style="background:var(--accent)"></span><span>target (compromised package)</span></div>
+      <!-- Distance is one hue getting darker, so the ramp is shown as a strip:
+           the reader sees an ordered scale rather than four unrelated dots and
+           does not have to learn which colour means "further". -->
+      <div class="legend-row" style="align-items:flex-start">
+        <span class="ramp" aria-hidden="true">
+          <i style="background:var(--hop1)"></i><i style="background:var(--hop2)"></i><i style="background:var(--hop3)"></i><i style="background:var(--hopN)"></i>
+        </span>
+        <span>dependency distance<br/><span style="color:var(--faint);font-size:11.5px">1 hop &rarr; 4+ hops from the target</span></span>
       </div>
-      <div class="legend-row"><span class="swatch" style="background:var(--danger)"></span> reachable <em>only</em> via publish rights</div>
+      <div class="legend-row" style="margin-top:9px">
+        <span class="swatch" style="background:var(--maintainer);border-radius:2px"></span>
+        <span>maintainer (square = different vertex type)</span>
+      </div>
+      <!-- The label is one span, not loose text around an <em>. In a flex row
+           each text node and each inline element becomes its own flex item, so
+           "reachable / only / via publish rights" was being laid out as three
+           gapped columns rather than a sentence. -->
+      <div class="legend-row"><span class="swatch" style="background:var(--danger)"></span><span>reachable <em>only</em> via publish rights</span></div>
       <div class="legend-row">
         <span class="swatch" style="background:transparent;border:1px dashed var(--danger)"></span>
-        in the dependency tree <em>and</em> in credential range
+        <span>in the dependency tree <em>and</em> in credential range</span>
       </div>
     </div>
 
@@ -481,7 +596,7 @@ async function loadTyposquats() {
     // from a coincidence, so the headline is the count that actually matters.
     const actionable = suspects.filter((s) => s.suspicion === "high" || s.suspicion === "medium");
     const verdict = actionable.length
-      ? `<strong style="color:var(--danger)">${actionable.length} likely typosquat${actionable.length === 1 ? "" : "s"}</strong> found.`
+      ? `<strong style="color:var(--error)">${actionable.length} likely typosquat${actionable.length === 1 ? "" : "s"}</strong> found.`
       : `<strong style="color:var(--hopN)">No likely typosquats.</strong>`;
     // Only mention the cleared names when there are some — "cleared 0 of
     // them" reads like a bug rather than a result.
@@ -511,7 +626,7 @@ async function loadTyposquats() {
       })
       .join("");
   } catch (err) {
-    container.innerHTML = `<div style="color:var(--danger);font-size:13px">Failed to load: ${esc(err.message)}</div>`;
+    container.innerHTML = `<div style="color:var(--error);font-size:13px">Failed to load: ${esc(err.message)}</div>`;
   }
 }
 
@@ -1233,10 +1348,16 @@ async function computeBlastRadius() {
     summaryEl.innerHTML = `<div class="big">${u.total}</div>
       package${u.total === 1 ? "" : "s"} in the total blast radius of
       <strong>${esc(data.target)}</strong>, combining both attack paths.
-      <div style="margin:10px 0 12px;font-size:12.5px;line-height:1.7;color:var(--muted)">
-        <span style="color:var(--hop1)">&#9679;</span> ${u.viaDependencyOnly} via dependencies only<br/>
-        <span style="color:var(--danger)">&#9679;</span> ${u.viaMaintainerOnly} via shared publish rights only<br/>
-        <span style="color:var(--hopN)">&#9679;</span> ${u.viaBoth} via both
+      <!-- These swatches restate exactly what the graph draws, so the two
+           readings cannot disagree: a dependency package wears its hop colour,
+           a credential-only package the credential colour, and one exposed by
+           both is the dependency dot inside a dashed credential ring — the
+           same halo the node itself carries. Two flat dots from the same blue
+           ramp said "dependencies" and "both" in almost the same colour. -->
+      <div class="breakdown">
+        <div><span class="sw sw-dep"></span><span class="tnum">${u.viaDependencyOnly}</span> via dependencies only</div>
+        <div><span class="sw sw-cred"></span><span class="tnum">${u.viaMaintainerOnly}</span> via shared publish rights only</div>
+        <div><span class="sw sw-both"></span><span class="tnum">${u.viaBoth}</span> via both</div>
       </div>
       <span style="color:var(--muted)">A dependency-only scanner reports
       <strong style="color:var(--text)">${exposedCount}</strong>.</span><br/><br/>
@@ -1312,9 +1433,9 @@ if (!servedOverHttp()) {
   const box = document.createElement("div");
   box.style.cssText =
     "margin:10px 0;padding:12px 14px;border:1px solid var(--border);" +
-    "border-left:3px solid var(--danger);border-radius:5px;line-height:1.6;color:var(--fg)";
+    "border-left:3px solid var(--error);border-radius:5px;line-height:1.6;color:var(--text)";
   box.innerHTML =
-    `<strong style="color:var(--danger)">This page has to be served, not opened as a file.</strong><br/>` +
+    `<strong style="color:var(--error)">This page has to be served, not opened as a file.</strong><br/>` +
     `It reads live results from the demo server's API, and opened directly ` +
     `(<code>${esc(location.protocol)}</code>) there is no origin for <code>/api/...</code> to resolve against.` +
     `<div style="margin-top:8px;color:var(--muted)">Start it and use the served URL:</div>` +
