@@ -55,20 +55,49 @@ function registryUrl(name) {
   return `${REGISTRY}/${encodeURIComponent(name)}/latest`;
 }
 
+// Statuses worth trying again. 429 is the one that actually bites: crawling
+// with CRAWL_CONCURRENCY parallel requests is enough to trip npm's rate limit,
+// and it was observed doing so — a gatsby crawl lost 194 packages to it in one
+// run, and a smaller crawl lost the root itself, which produced an empty
+// ingest. Without a retry, a limit that clears in a second permanently costs
+// the crawl a whole subtree.
+const TRANSIENT_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const FETCH_ATTEMPTS = 4;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function fetchManifest(name) {
-  // A single stalled registry request must not stall the whole crawl —
-  // callers already treat a thrown error as "skip this package" (see the
-  // try/catch around fetchManifest() in crawl() below).
-  const res = await fetchWithTimeout(registryUrl(name), {}, 10_000);
-  // 404 is a real answer: the package is unpublished, removed, or private, and
-  // re-running will not change it. Anything else — 5xx, a rate limit, a
-  // truncated body — is the registry failing to answer a question that has an
-  // answer, and the crawl is missing a subtree it should have had. The two are
-  // separated so crawl() can report them differently: one is information about
-  // npm, the other is a reason to run ingestion again.
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`registry returned ${res.status}`);
-  const manifest = await res.json();
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+    // A single stalled registry request must not stall the whole crawl —
+    // callers already treat a thrown error as "skip this package" (see the
+    // try/catch around fetchManifest() in crawl() below).
+    const res = await fetchWithTimeout(registryUrl(name), {}, 10_000);
+
+    // 404 is a real answer: the package is unpublished, removed, or private,
+    // and re-running will not change it. Anything else — 5xx, a rate limit, a
+    // truncated body — is the registry failing to answer a question that has
+    // an answer, and the crawl is missing a subtree it should have had. The
+    // two are separated so crawl() can report them differently: one is
+    // information about npm, the other is a reason to run ingestion again.
+    if (res.status === 404) return null;
+    if (res.ok) return parseManifest(res.json());
+
+    lastStatus = res.status;
+    if (!TRANSIENT_STATUS.has(res.status) || attempt === FETCH_ATTEMPTS) break;
+
+    // Honour Retry-After when the registry sends one (429 usually does),
+    // otherwise back off exponentially. Capped so one throttled package cannot
+    // stretch a crawl by minutes.
+    const retryAfter = Number(res.headers?.get?.("retry-after"));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 8000)
+      : Math.min(250 * 2 ** (attempt - 1), 4000);
+    await sleep(waitMs);
+  }
+  throw new Error(`registry returned ${lastStatus} after ${FETCH_ATTEMPTS} attempts`);
+}
+
+function parseManifest(manifest) {
   return {
     dependencies: {
       ...(manifest.dependencies ?? {}),
@@ -283,6 +312,20 @@ async function main() {
       `NOTE: ${notFound.length} package(s) are not published (404) and were skipped: ` +
       `${notFound.slice(0, 5).join(", ")}${notFound.length > 5 ? ", ..." : ""}`
     );
+  }
+
+  // The root failing is categorically different from a leaf failing: nothing
+  // was ingested at all, so the run did not do the thing it was asked to do.
+  // It used to print "Nothing to write" and exit 0, which reads like a package
+  // that simply has no dependencies — and under setup.sh's `set -e` it meant a
+  // rate-limited root produced an empty graph without stopping the script.
+  if (unresolved.some((u) => u.name === root)) {
+    const reason = unresolved.find((u) => u.name === root).reason;
+    console.error(
+      `\nERROR: could not fetch "${root}" itself (${reason}), so nothing was ingested.\n` +
+      `       ${reason.includes("429") ? "The registry is rate-limiting this client; wait a moment and re-run." : "Check the package name and your connection, then re-run."}`
+    );
+    process.exit(1);
   }
 
   if (edges.length === 0 && maintainedBy.length === 0) {

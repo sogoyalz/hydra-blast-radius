@@ -13,11 +13,16 @@
 // Usage: node src/sharedMaintainers.js <package-name>
 
 import { pathToFileURL } from "node:url";
-import { runQuery, packageId } from "./hydra.js";
+import { runQuery, runQueryPaged, packageId } from "./hydra.js";
 
 // Returns [{ maintainer, packages: [...] }], excluding the target itself.
 export async function sharedMaintainers(name) {
-  const rows = await runQuery(
+  // Paged: this returns one row per (maintainer, package) pair, so a
+  // widely-trusted publisher blows past the engine's silent 1024-row cap long
+  // before the package count does — and this traversal IS the project's
+  // headline finding, the reach a dependency scanner cannot see. Truncating it
+  // would under-report the credential blast radius with no indication.
+  const rows = await runQueryPaged(
     `MATCH (target:Package {id: ${packageId(name)}})-[:MAINTAINED_BY]->(m:Maintainer)-[:MAINTAINS]->(sibling:Package) ` +
     `RETURN m.name AS maintainer, sibling.name AS pkg`
   );

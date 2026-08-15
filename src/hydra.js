@@ -30,6 +30,9 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TI
     return {
       ok: res.ok,
       status: res.status,
+      // Exposed for Retry-After, which is how the npm registry says how long
+      // to wait after a 429 — see the retry loop in ingest.js.
+      headers: res.headers,
       text: () => text,
       json: () => JSON.parse(text),
     };
@@ -111,6 +114,36 @@ function unwrap(cell) {
 // rejecting the whole batch: these are used for the draw-only edge lookups,
 // where one missing node's edges should not discard an otherwise-complete
 // answer. The failure is logged so it is not silent.
+// HydraDB caps EVERY query result at 1024 rows. Not just the path procedures —
+// measured directly against the engine, `MATCH (a)-[:DEPENDS_ON]->(b) RETURN
+// a.name, b.name` on a graph with more edges than that returns exactly 1024,
+// with nothing in the response marking it short. A blast radius of 1500
+// packages therefore came back as 1024 and looked complete, which is precisely
+// the under-reporting this project treats as its one unacceptable failure.
+//
+// SKIP/LIMIT are supported and, importantly, reach past the cap: `SKIP 1024`
+// returns real rows. So the cap is on rows returned per request, not on rows
+// the engine is willing to consider, and paging recovers the whole set.
+//
+// The query passed here must not already carry SKIP/LIMIT, and its ordering
+// only has to be stable enough not to drop rows between pages — verified
+// recovering all 1500 of a known 1500-row result both with and without an
+// explicit ORDER BY.
+const ROW_CAP = 1024;
+const PAGE_SIZE = 1000; // under the cap, so a short page reliably means "done"
+
+export async function runQueryPaged(query, parameters, maxRows = 200_000) {
+  const all = [];
+  for (let skip = 0; skip < maxRows; skip += PAGE_SIZE) {
+    const rows = await runQuery(`${query} SKIP ${skip} LIMIT ${PAGE_SIZE}`, parameters);
+    all.push(...rows);
+    if (rows.length < PAGE_SIZE) return all;
+  }
+  return all;
+}
+
+export { ROW_CAP };
+
 export async function runQueriesConcurrent(queries, limit = 16) {
   const results = new Array(queries.length);
   let next = 0;
