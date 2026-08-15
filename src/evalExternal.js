@@ -291,7 +291,11 @@ async function main() {
 
   const anyDisagreement = results.some((r) => r.missed.length > 0 || r.extra.length > 0);
   if (anyDisagreement) {
-    console.log("\nWhere the two sources disagree, and why that is expected:");
+    // Deliberately not "why that is expected". Some of these are explained
+    // with evidence and some are only guessed at, and a validation script that
+    // pre-frames every disagreement as expected is one that will explain away
+    // a real defect the day it finds one.
+    console.log("\nWhere the two sources disagree, and what accounts for it:");
     for (const r of results) {
       if (r.missed.length === 0 && r.extra.length === 0) continue;
       console.log(`  ${r.target}:`);
@@ -329,10 +333,16 @@ async function main() {
         const unexplained = r.extra.length - peerExplained.length;
         if (unexplained > 0) {
           console.log(
-            `      -> ${unexplained} remaining: version skew — this graph is built from each`
+            `      -> ${unexplained} NOT explained by a peer edge. The likely cause is version`
           );
           console.log(
-            `         package's 'latest' manifest, deps.dev resolves one concrete version`
+            `         skew (this graph uses each package's 'latest' manifest, deps.dev resolves`
+          );
+          console.log(
+            `         one concrete version) — but that is a hypothesis, not something this`
+          );
+          console.log(
+            `         script verified. Worth checking by hand before trusting it.`
           );
         }
       }

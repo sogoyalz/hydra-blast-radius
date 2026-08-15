@@ -246,7 +246,14 @@ async function main() {
     `MATCH (p:Package {id: ${packageId(name)}}) RETURN p.name AS name`
   );
   if (exists.length === 0) {
-    console.log(`"${name}" is not in the ingested graph — run ingestion first, or it has no known dependents.`);
+    // Only one thing can bring you here: the vertex does not exist. A package
+    // that IS in the graph but has nothing depending on it passes this check
+    // and reports "0 package(s) transitively exposed" below. The message used
+    // to offer "or it has no known dependents" as an alternative explanation,
+    // which cannot be true here and points the reader at the reassuring
+    // reading — "nothing depends on it" — when the actual situation is that
+    // the package was never ingested and nothing has been checked at all.
+    console.log(`"${name}" is not in the ingested graph, so nothing has been checked — run ingestion for it first.`);
     return;
   }
 

@@ -129,7 +129,6 @@ function unwrap(cell) {
 // only has to be stable enough not to drop rows between pages — verified
 // recovering all 1500 of a known 1500-row result both with and without an
 // explicit ORDER BY.
-const ROW_CAP = 1024;
 const PAGE_SIZE = 1000; // under the cap, so a short page reliably means "done"
 
 export async function runQueryPaged(query, parameters, maxRows = 200_000) {
@@ -139,10 +138,15 @@ export async function runQueryPaged(query, parameters, maxRows = 200_000) {
     all.push(...rows);
     if (rows.length < PAGE_SIZE) return all;
   }
-  return all;
+  // Reaching here means every page came back full, so there is very probably
+  // more data and this result is short. Returning it would reintroduce exactly
+  // the silent truncation this function exists to remove, just at a much
+  // higher threshold — so it throws instead. Callers already treat a thrown
+  // query as a failed request rather than an empty answer.
+  throw new Error(
+    `query exceeded ${maxRows} rows while paging; refusing to return a partial result: ${query.slice(0, 120)}`
+  );
 }
-
-export { ROW_CAP };
 
 export async function runQueriesConcurrent(queries, limit = 16) {
   const results = new Array(queries.length);
