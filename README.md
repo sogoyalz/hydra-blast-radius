@@ -27,7 +27,7 @@ The gap is not academic. On the demo graph:
 
 ![One maintainer's publish reach from body-parser](docs/credential-reach.png)
 
-*Clicking the maintainer `dougwilson` lights up everything one stolen credential reaches. The small orange core is the entire dependency blast radius; every other node is invisible to a dependency scanner. Both channels are drawn — squares are maintainers, dashed edges are publish rights.*
+*Clicking the maintainer `dougwilson` lights up everything one stolen credential reaches. The two-node core near the centre — `body-parser` and `express` — is the entire dependency blast radius; every other node is invisible to a dependency scanner. Both channels are drawn — squares are maintainers, dashed edges are publish rights.*
 
 **Why a graph database rather than a table or a vector index.** The dependency answer is a transitive closure of unbounded depth — a self-join repeated until fixpoint in SQL, one traversal here. The publish-rights answer is a two-hop walk *across two different edge types* (`MAINTAINED_BY` then `MAINTAINS`). Neither is a similarity question, so an embedding index cannot answer either one: "which packages are semantically similar to `qs`" is not "which packages break when `qs` breaks."
 
