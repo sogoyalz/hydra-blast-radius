@@ -84,6 +84,31 @@ That requires a key unique per row, which shapes the queries. The blast-radius t
 
 The consequence is worth stating plainly, because it cuts against the speedup table above: **on a large graph the popular packages — the ones whose blast radius you most want — are exactly the ones that fall back to the slower, exhaustive path.** The single-query result is real, and it is what the demo graph runs on; it is not a claim about every graph.
 
+#### Reproduced on demand, at 1,505 packages
+
+The 120-package demo graph never triggers any of this, so none of it is visible in the demo — which is a fair reason to be sceptical of it. Ingesting ~40 more npm roots brings the graph to **1,505 packages / 3,444 dependency edges**, and every mechanism above fires:
+
+**The row cap truncates a plain query.** Asking for every package name in one query returns exactly **1,024** rows against a graph holding **1,505** — no error, no flag, no `next_cursor` marking the result short. The keyset pager returns all 1,505. **481 packages, silently absent** from a query that looked like it succeeded.
+
+**The path ceiling saturates on the densest targets, and the fallback catches it.** Taking the six most depended-upon packages by in-degree:
+
+| Target | `algo.SSpaths` | Exhaustive fallback | Outcome |
+|---|---|---|---|
+| `tslib` | **saturated** | 82 | ceiling detected → fell back |
+| `es-errors` | **saturated** | 135 | ceiling detected → fell back |
+| `call-bound` | **saturated** | 92 | ceiling detected → fell back |
+| `debug` | 93 (1.2s) | 93 (5.7s) | agree |
+| `semver` | 95 (1.4s) | 95 (6.2s) | agree |
+| `@parcel/plugin` | 43 (0.6s) | 43 (1.9s) | agree |
+
+Three of the six densest packages in the graph saturate the fast path. The guard catches all three and the slower walk answers them completely. The other three agree exactly between the two engines — which is the part that makes the fallback trustworthy rather than merely different: where the fast path *is* complete, it and the exhaustive path return the identical set.
+
+**End to end through the API**, `/api/blast-radius?name=es-errors` reports `engine: "variable-length MATCH"` and `fallbackReason: "path-ceiling"`, and the UI says the radius is complete rather than truncated — a saturated ceiling means the fast path *would have* under-reported this specific answer, which is worth saying out loud on a security tool.
+
+**And the honest cost.** `coreQueryMs` goes from 4–6ms on the demo graph to 0.6–1.4s here, and a saturating target costs ~2s on the fallback traversal plus several seconds more to assemble the drawing. Work is proportional to paths enumerated, not to answer size. The 13–29x speedup in the table above is a demo-graph number and does not survive to this scale; the correctness guarantee does.
+
+Reproduce with `node src/eval.js`-style ingestion of additional roots — any ~40 npm roots will do it, since the thresholds are properties of the engine, not of the packages chosen.
+
 **Proof the traversal is correct.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. This is a correctness gate on the ingest → store → traverse round trip, not a vulnerability-detection accuracy score — the distinction matters and is spelled out in [the eval section](#correctness-eval).
 
 **And proof the data itself is right.** That gate has a real limit: its ground truth is derived from this project's own crawl, so a crawler that learned the wrong edges would be graded against its own mistake and still score 1.00. `src/evalExternal.js` closes that loop by scoring against **deps.dev (Google's Open Source Insights)** — an independently resolved dependency graph for npm, built by Google's resolver with no connection to this crawler. Inverting its forward closures gives a true external answer to "who depends on X", and against it this project scores **recall 1.00, mean precision 0.94** — and every point of that precision gap is attributed by name, not hand-waved: it is `minimizer-webpack-plugin` reaching those targets through its `webpack` **peerDependency**, an edge this graph models deliberately (a compromised peer runs in your build exactly like a compromised dependency) and an install closure does not walk. See [validation against an independent source](#validation-against-an-independent-source).
