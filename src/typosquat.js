@@ -7,7 +7,7 @@
 // Usage: node src/typosquat.js [--max-distance=2]
 
 import { pathToFileURL } from "node:url";
-import { runQuery, fetchWithTimeout } from "./hydra.js";
+import { runQueryPagedKeyset, fetchWithTimeout } from "./hydra.js";
 
 // A static, defensible "popular package" reference set rather than a live
 // popularity API call per candidate (faster, no rate limits, no flakiness
@@ -143,8 +143,18 @@ export async function findTyposquats(candidateNames, maxDistance = 2) {
   );
 }
 
+// Paged past HydraDB's undocumented 1024-row cap (see runQueryPagedKeyset in
+// hydra.js). An unpaged scan here would silently truncate the package list —
+// and with it the typosquat scan's coverage — on any graph past 1024
+// packages, exactly the failure mode this project treats as unacceptable
+// everywhere else. This used to be a plain runQuery, inconsistent with the
+// paged version server.js uses for the same question.
 async function allIngestedPackageNames() {
-  const rows = await runQuery("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+  const rows = await runQueryPagedKeyset(
+    "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
+    "p.name",
+    "name"
+  );
   return rows.map((r) => r.name).filter(Boolean);
 }
 
