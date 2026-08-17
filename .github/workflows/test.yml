@@ -27,6 +27,34 @@ jobs:
       # alarm rather than an inconvenience.
       - name: Unit tests
         run: npm test
+      # A stray NUL byte makes git classify a source file as binary, which
+      # hides every diff in it on GitHub — reviewers and judges see "Binary
+      # file not shown" instead of the code. It has happened twice in
+      # src/hydra.js, both times from an id-namespace separator, and neither
+      # time did anything fail: tests pass, the code runs, and the only symptom
+      # is the file quietly becoming unreadable in review. `grep` cannot be
+      # used to check (it will not match NUL in a pattern and reports a clean
+      # file), so this reads the bytes directly.
+      - name: Assert no source file contains a NUL byte
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const roots = ["src", "frontend", "test"];
+            let bad = 0;
+            for (const dir of roots) {
+              for (const name of fs.readdirSync(dir)) {
+                const p = path.join(dir, name);
+                if (!fs.statSync(p).isFile()) continue;
+                const at = fs.readFileSync(p).indexOf(0);
+                if (at !== -1) {
+                  console.error(`NUL byte in ${p} at offset ${at} — git will treat this file as binary and hide its diff.`);
+                  bad++;
+                }
+              }
+            }
+            if (bad > 0) process.exit(1);
+            console.log("No NUL bytes in any source file.");
+          '
       - name: Assert the dependency-free claim still holds
         run: |
           if [ -d node_modules ]; then

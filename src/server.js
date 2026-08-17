@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { blastRadiusWithHops } from "./blastRadius.js";
 import { findTyposquats } from "./typosquat.js";
 import { sharedMaintainerReach } from "./sharedMaintainers.js";
+import { analyzeVersions } from "./versions.js";
 import { runQuery, runQueryPagedKeyset, packageId, DEFAULT_TIMEOUT_MS } from "./hydra.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -33,6 +34,16 @@ let typosquatCache = null; // { key, packageCount, suspects }
 // the outbound calls and invite rate limiting for answers that are all
 // identical anyway.
 let typosquatInFlight = null; // { key, promise }
+
+// Version analysis, cached per package rather than under one global key the
+// way the typosquat scan is: that scan is a property of the whole graph, this
+// is a property of one package, and two different packages must not evict each
+// other. Same in-flight sharing for the same reason — a cold analysis fetches
+// a packument (qs's is ~360KB) and writes a MERGE per version, so concurrent
+// requests for the same never-analyzed package would otherwise each run the
+// whole thing.
+const versionCache = new Map(); // package name -> result
+const versionInFlight = new Map(); // package name -> promise
 
 function parsePort(argv) {
   for (const arg of argv) {
@@ -227,6 +238,39 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { packageCount: scan.packageCount, suspects: scan.suspects });
   }
 
+  if (url.pathname === "/api/versions") {
+    const name = url.searchParams.get("name");
+    if (!name) return sendJson(res, 400, { error: "missing ?name=" });
+    // Gated on the package being in the graph, like every other endpoint. That
+    // is also what stops this being used as an open proxy to fetch an
+    // arbitrary npm packument through this server.
+    const exists = await runQuery(`MATCH (p:Package {id: ${packageId(name)}}) RETURN p.name AS name`);
+    if (exists.length === 0) {
+      return sendJson(res, 404, { error: `"${name}" is not in the ingested graph` });
+    }
+
+    if (versionCache.has(name)) {
+      return sendJson(res, 200, versionCache.get(name));
+    }
+    if (!versionInFlight.has(name)) {
+      versionInFlight.set(
+        name,
+        analyzeVersions(name)
+          .then((result) => {
+            // Only cache a complete answer. An analysis that could not reach
+            // OSV has to be retried on the next request rather than pinning
+            // "we don't know" in place for the life of the process — the whole
+            // point of distinguishing it from "no advisories" is that it is a
+            // transient failure, not a finding.
+            if (!result.osvUnavailable) versionCache.set(name, result);
+            return result;
+          })
+          .finally(() => versionInFlight.delete(name))
+      );
+    }
+    return sendJson(res, 200, await versionInFlight.get(name));
+  }
+
   if (url.pathname === "/api/packages") {
     const names = await allIngestedPackageNames();
     return sendJson(res, 200, { names: names.sort() });
@@ -268,7 +312,19 @@ const server = createServer(async (req, res) => {
     // the demo ("go check the container"), unlike an arbitrary internal
     // error, and it used to surface as an infinite "Loading..." with no
     // signal at all rather than any response, timed out or otherwise.
-    if (err.message?.includes("timed out")) {
+    // An error tagged with `upstream` came from a third-party service (the npm
+    // registry, OSV), not from the database. This check has to come FIRST:
+    // those calls go through the same fetchWithTimeout, so their failures also
+    // say "timed out", and the HydraDB branch below would confidently tell
+    // someone to go restart a container that is working perfectly. Naming the
+    // service that actually failed is the difference between a useful error
+    // and a wild goose chase mid-demo.
+    if (err.upstream) {
+      sendJson(res, 503, {
+        error: `${err.upstream} isn't responding, so this couldn't be checked. HydraDB itself is fine.`,
+        upstream: err.upstream,
+      });
+    } else if (err.message?.includes("timed out")) {
       sendJson(res, 503, { error: "HydraDB isn't responding — check that the container is running and healthy." });
     } else {
       sendJson(res, 500, { error: "internal server error" });

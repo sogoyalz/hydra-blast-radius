@@ -204,6 +204,7 @@ cat <<EOF
     node src/blastRadius.js qs
     node src/sharedMaintainers.js body-parser
     node src/typosquat.js
+    node src/versions.js qs                          # which versions each advisory affects
     node src/eval.js koa --depth=3 --max-nodes=200   # clean table: ./setup.sh --fresh --no-ingest first
 
   Ctrl-C stops the server (HydraDB keeps running; 'docker rm -f hydradb' stops it).

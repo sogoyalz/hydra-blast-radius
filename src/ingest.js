@@ -111,7 +111,7 @@ function parseManifest(manifest) {
   };
 }
 
-async function mapWithConcurrency(items, limit, fn) {
+export async function mapWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
   let next = 0;
   async function worker() {

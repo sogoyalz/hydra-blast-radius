@@ -131,7 +131,7 @@ Once it's up, try **`body-parser`**: one package exposed through dependencies, ~
 
 ## Status
 
-Working end-to-end, including the demo UI. Of the six questions the track brief asks a submission to answer when a package is compromised, this answers four:
+Working end-to-end, including the demo UI. Of the six questions the track brief asks a submission to answer when a package is compromised, this answers five:
 
 | Brief's question | Status |
 |---|---|
@@ -139,12 +139,14 @@ Working end-to-end, including the demo UI. Of the six questions the track brief 
 | Which services are transitively exposed? | ✅ `src/blastRadius.js`, reported with hop distance |
 | Which packages share maintainers with it? | ✅ `src/sharedMaintainers.js` |
 | Are there likely typosquats nearby? | ✅ `src/typosquat.js` |
-| Which version introduced the vulnerability? | ❌ graph is version-less today |
+| Which version introduced the vulnerability? | ✅ `src/versions.js`, against OSV's affected ranges |
 | Which apps resolved the bad version while live? | ❌ needs lockfile ingestion |
 
-The two gaps share one cause and one fix: the graph models packages, not versions. Adding `(:Package)-[:HAS_VERSION]->(:Version)` and ingesting lockfiles would answer both, and it is the obvious next edge type. That was a deliberate trade — the second *attack channel* (publish rights) was worth more than a second *dimension* on the channel already modelled, because the incident the brief opens with spread through credentials, and no amount of version resolution would have caught it.
+The one remaining gap needs something the others did not: a concept of an *application* at all. This graph models packages and the people who can publish them; "which apps resolved the bad version while it was live" needs each app's resolved lockfile plus the window each bad version was installable in — a new vertex type and an ingestion source, not another query over what is already here. It is left undone and said so rather than approximated.
 
-Plus two evals and a test suite: a [round-trip correctness gate](#correctness-eval) (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), [validation against deps.dev](#validation-against-an-independent-source) so the *data* is graded by an outside resolver and not only by this project's own crawl, and [21 unit tests](#unit-tests) (`npm test`) covering the id-collision, escaping, timeout and filter logic. Served through a zero-dependency API + browser visualization (`node src/server.js`, then `http://127.0.0.1:8787`).
+Version-level modelling arrived late and deliberately second. The first thing built after the dependency graph was the other *attack channel* (publish rights), because the incident the brief opens with spread through stolen credentials, and no amount of version resolution would have caught it. Versions are a second *dimension* on a channel already modelled — worth having, but worth less than the channel nobody else was modelling at all.
+
+Plus two evals and a test suite: a [round-trip correctness gate](#correctness-eval) (independently-computed ground truth vs. HydraDB's own traversal, cross-referenced against real OSV advisories), [validation against deps.dev](#validation-against-an-independent-source) so the *data* is graded by an outside resolver and not only by this project's own crawl, and [37 unit tests](#unit-tests) (`npm test`) covering the id-collision, escaping, timeout, semver-ordering, advisory-range and filter logic. Served through a zero-dependency API + browser visualization (`node src/server.js`, then `http://127.0.0.1:8787`).
 
 ### Running the demo UI
 
@@ -187,6 +189,41 @@ RETURN m.name, sibling.name
 The gap between the two answers is the point, and it is measured at the top of this README: `body-parser` exposes **1** package through dependencies and **36** through publish rights — **35** of them reachable by no dependency edge at all.
 
 > Note: this models *blast radius*, not wrongdoing. These are the legitimate maintainers of widely-used packages; the point is that their credentials are a high-value target, which is what makes the exposure worth measuring.
+
+### Version-level advisory ranges
+
+```bash
+node src/versions.js qs
+```
+
+The blast radius above is computed over packages, which is the right granularity for "what is exposed" and the wrong one for "is *my* version exposed". `src/versions.js` adds `(:Package)-[:HAS_VERSION]->(:Version)`, carrying each release's real publish date from the npm registry, and checks every published version against OSV's affected ranges.
+
+**The brief's wording invites a useless answer, so this reports something better.** "Which version introduced the vulnerability" sounds like it wants one number, and for most advisories that number is trivially "the first release ever published" — OSV writes `introduced: "0"` whenever a bug predates every release, which is the most common case by far. Of `qs`'s 7 advisories, 5 start at `0`. Answering "0.0.1 introduced it" five times is technically correct and tells you nothing. What the data actually supports, and what this reports, is **which published versions fall inside an affected range and exactly where each range closes** — with the literal introduced version alongside it whenever OSV names a real one.
+
+Measured against `qs`'s 149 published versions and its 7 real GHSA advisories:
+
+| Advisory | Affected versions | Range | Introduced | Fixed |
+|---|---|---|---|---|
+| GHSA-hrpp-h998-j3pp | 98 of 149 | `0.0.1` → `6.10.2` | 9 separate windows | 9 separate fixes |
+| GHSA-6rw7-vpxm-498p | 143 of 149 | `0.0.1` → `6.14.0` | first release | `6.14.1` |
+| GHSA-w7fw-mjwx-w883 | 47 of 149 | `6.7.0` → `6.14.1` | **`6.7.0`** | `6.14.2` |
+| GHSA-q8mj-m7cp-5q26 | 19 of 149 | `6.11.1` → `6.15.1` | **`6.11.1`** | `6.15.2` |
+
+The two bolded rows are the ones where "which version introduced it" has a real answer, and it is not the first release.
+
+**Why an advisory is a set of windows, not a range.** `GHSA-hrpp-h998-j3pp` carries **nine** independent affected windows, because the fix landed separately on nine maintained release lines (`6.3.x`, `6.4.x`, … `6.10.x`, plus everything below `6.2.4`). Reading it as a single `introduced..fixed` span — the obvious implementation — marks the gaps between those windows as affected when they are patched, or marks whole later lines safe when they are not. `isAffectedByRange()` walks OSV's events in order the way the spec describes: an `introduced` at or below the version opens a window, a `fixed` at or below closes it, and the version is affected if any window is still open at the end. Verified by re-deriving the same 98 versions through an independent interval-membership implementation: **both agree exactly, on all 149 versions, with zero disagreements**, and the boundaries land where they should — `6.2.3` affected, `6.2.4` not, `6.3.0` affected again, `6.10.2` affected, `6.10.3` not.
+
+Three details that are easy to get silently wrong, and are handled rather than assumed:
+
+- **`introduced: "0"` is a sentinel, not a version.** Parsing it as `0.0.0` would exclude a package whose first release was a prerelease, since `0.0.0-alpha` sorts *below* `0.0.0` and would fall outside a range meant to cover everything. It is treated as negative infinity.
+- **A range with no `fixed` event means still vulnerable**, and must resolve to affected rather than to "no information".
+- **`GIT`-type ranges express commit reachability**, which no version comparator can decide. They are skipped, counted, and surfaced — never quietly folded in as "not affected".
+
+Version strings that are not valid semver return `null` from the comparator instead of being coerced into something sortable, and are counted and reported rather than dropped: a version silently mis-ordered across a range boundary is exactly the quiet wrongness this project refuses everywhere else.
+
+**Cost.** Version history is ingested on demand and only once per package: a cold `send` (69 versions) costs 1168ms to crawl and write plus 337ms at OSV; warm, the same call is a 278ms paged read plus the same OSV round trip. Ingest is capped at `--max-versions` (default 500, newest first) and says so when it truncates, because "earliest affected version" over a capped history is the earliest *among those ingested* — a different claim, and one worth not blurring.
+
+**When OSV cannot be reached, this reports that, not "no vulnerabilities."** The distinction is the whole point: a network failure rendered as an empty advisory list tells a reader the package is clean when nothing was checked at all. The CLI exits non-zero and says so, the API returns `osvUnavailable`, and the UI renders it as its own state. This is the one place the codebase deliberately does *not* follow `typosquat.js`'s pattern of defaulting a failed lookup to zero — there the number feeds a ratio, here it *is* the finding.
 
 ### Correctness eval
 
@@ -251,7 +288,7 @@ Two sources of disagreement are separated and labelled rather than folded into t
 npm test
 ```
 
-21 tests, `node --test`, no dependency added and no running database or network needed. CI runs them on **Node 18 and 22** — 18 because that is the floor `package.json` claims, and a claimed floor nobody tests is just a comment. The same job fails the build if a third-party dependency or a `node_modules` ever appears, so the zero-dependency claim below cannot quietly go stale — the graph-dependent behaviour is already covered by the two evals above. They are regression tests rather than coverage for its own sake: every case guards a decision made for a stated reason, or a bug that actually happened here and would be silent if it came back.
+37 tests, `node --test`, no dependency added and no running database or network needed. CI runs them on **Node 18 and 22** — 18 because that is the floor `package.json` claims, and a claimed floor nobody tests is just a comment. The same job fails the build if a third-party dependency or a `node_modules` ever appears, so the zero-dependency claim below cannot quietly go stale — the graph-dependent behaviour is already covered by the two evals above. They are regression tests rather than coverage for its own sake: every case guards a decision made for a stated reason, or a bug that actually happened here and would be silent if it came back.
 
 - **Vertex ids.** A package and a maintainer of the same name must never hash to the same id. HydraDB keys vertices on the integer id alone — labels do not scope identity and they accumulate — so a collision silently fuses two entities into one vertex holding both sets of edges, and npm users routinely publish a package under their own handle. Also asserts ids stay inside the safe-integer range, since they are written into Cypher as integer literals.
 - **`cypherString` escaping.** Names come from third-party manifests and are interpolated into query text, so this is the boundary that stops a registry name terminating the literal. Includes an injection payload, and the backslash-before-quote ordering that keeps a trailing backslash from escaping the closing delimiter.
@@ -259,6 +296,9 @@ npm test
 - **`levenshtein` and the filter thresholds.** Pins the distances the typosquat filter is tuned around, including the short-name pairs (`ms`/`qs`, `acorn`/`cors`) that motivate the ratio rule. Writing these caught a documentation error: `reqeust`/`request` is the distance-2 case the docs meant, while `reqeusts` is distance 3 and is rejected — a typo in the example about typos.
 - **`groundTruthBlastRadius`.** The independent BFS the correctness eval is graded against, so a bug here would quietly corrupt the thing doing the grading. Includes a cyclic graph, since merging `peerDependencies` into dependency edges creates cycles routinely.
 - **`precisionRecall`.** Perfect agreement, one-sided misses, and the empty-set case that must not produce `NaN`.
+- **`compareSemver`.** Ordering, prerelease precedence (`1.0.0-alpha` < `1.0.0`, numeric identifiers compared numerically so `alpha.9` < `alpha.10`, numeric ranking below alphanumeric), build metadata ignored, and unparseable input returning `null` instead of sorting wrongly. This decides which releases sit inside an advisory's affected range; getting it wrong moves a boundary silently rather than failing.
+- **`isAffectedByRange`.** Inclusive `introduced` and exclusive `fixed`, the `"0"` sentinel covering a prerelease below `0.0.0`, an open range with no fix still counting as affected, `last_affected` closing inclusively where `fixed` does not, `GIT` ranges skipped and counted, and — the case a naive implementation gets wrong — **multiple windows staying independent, with the gap between them correctly safe**.
+- **Version id namespacing.** That a `:Version` cannot collide with its own `:Package` or a `:Maintainer`, and that the length-prefixed encoding cannot be forged from either field. That last test failed when it was written, which is how the separator ambiguity above was found.
 
 ### On the latency numbers
 
@@ -286,12 +326,15 @@ The panel leads with the verdict rather than the raw candidate list, since the c
 
 ## How HydraDB is used
 
-The graph has two vertex types and four edge types:
+The graph has three vertex types and five edge types:
 
 - `(dependent:Package)-[:DEPENDS_ON]->(dependency:Package)` — the natural direction
 - `(dependency)-[:REQUIRED_BY]->(dependent)` — the reverse, written at ingest time
 - `(package)-[:MAINTAINED_BY]->(maintainer:Maintainer)` — publish rights
 - `(maintainer)-[:MAINTAINS]->(package)` — the reverse, likewise
+- `(package)-[:HAS_VERSION]->(version:Version)` — release history with publish dates
+
+`HAS_VERSION` needs no mirrored twin, unlike the two above it. Those are mirrored because they are walked *transitively* from a fixed vertex, and a variable-length `MATCH` here can only expand forward. This one is a single hop, always from a known package to its own releases, so the restriction never applies — the constraint shapes the model exactly where it bites and nowhere else.
 
 The blast-radius question is asked two ways against the same model, and both are forward walks over `REQUIRED_BY` from the compromised package.
 
@@ -314,6 +357,8 @@ This is the core "why HydraDB" of the project: computing everything transitively
 ### Why vertex ids are hashed and namespaced
 
 HydraDB keys vertices on `id` alone — **the label does not scope identity**, and labels accumulate. MERGE-ing a `:Package` onto an id already held by a `:Maintainer` silently overwrites that vertex's properties and leaves a single vertex answering to both labels while carrying both sets of edges (verified against the running node). Since `id` must be an integer, names are hashed — and because npm users routinely publish a package under their own handle, maintainer ids are hashed in a **separate namespace** (`maintainerId()` in `src/hydra.js`). Without that, maintainer `ljharb` and a package named `ljharb` would fuse into one vertex with certainty.
+
+`versionId()` needs one thing more, because it hashes **two** variable-length fields rather than one. Any separator character can be smuggled in from either side: with a space, `("a", "b 1.0")` and `("a b", "1.0")` produce the same string and collapse into one vertex. npm's own rules happen to forbid spaces in both names and versions, so real registry data cannot reach that collision — but "safe because of someone else's validation" is a weaker guarantee than the other two ids rest on, and a fused vertex is silent when it happens. A length prefix (`npm-version 2:qs6.9.0`) removes the ambiguity outright: the boundary is stated, not inferred, so no content in either field can imitate it. There is a unit test that constructs the colliding pair and asserts the two ids differ — it failed, and caught this, before the encoding was changed.
 
 ### Why the mirrored edge
 
