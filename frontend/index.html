@@ -1370,9 +1370,9 @@ async function loadVersions(packageName) {
   const header = `<div style="margin-bottom:11px;color:var(--muted);font-size:12.5px">
     <strong style="color:var(--text)">${esc(data.versionCount)}</strong> published versions
     ingested, <code>${esc(data.earliestVersion)}</code> → <code>${esc(data.latestVersion)}</code>.
-    ${data.truncated ? `<br/><span style="color:var(--hop1)">Capped at the most recent
-      ${esc(data.versionCount)} of ${esc(data.totalKnownVersions)} — "earliest affected" below
-      is the earliest among these.</span>` : ""}
+    ${data.truncated ? `<br/><span style="color:var(--hop1)">Holding the most recent
+      ${esc(data.versionCount)} of ${esc(data.totalKnownVersions)} published — every count below is
+      over that subset, and older affected releases may exist outside it.</span>` : ""}
     ${data.nonSemverCount > 0 ? `<br/>${esc(data.nonSemverCount)} non-semver version string(s)
       excluded from range analysis.` : ""}
   </div>`;
@@ -1413,6 +1413,13 @@ async function loadVersions(packageName) {
                ${esc(a.skippedGitRanges)} commit-range(s) not decidable by version number
              </div>`
           : "";
+      // An unevaluated window fails closed, so the count above is a floor, not
+      // a total. Said plainly rather than left to be inferred.
+      const undecidable = a.undecidable
+        ? `<div style="margin-top:4px;color:var(--error);font-size:11.5px">
+             A version boundary in this advisory could not be parsed — the count above is a lower bound.
+           </div>`
+        : "";
       const alias = a.aliases.length ? ` <span style="color:var(--faint)">${esc(a.aliases[0])}</span>` : "";
       return `<div class="suspect">
         <strong>${esc(a.id)}</strong>${alias}
@@ -1423,7 +1430,7 @@ async function loadVersions(packageName) {
           ${a.affectedCount > 0 ? `<br/><span style="color:var(--muted)">range:</span> ${span}` : ""}
           <br/><span style="color:var(--muted)">introduced:</span> ${introduced || "unstated"}
           <br/><span style="color:var(--muted)">fixed in:</span> ${fixed}
-        </div>${windows}${git}
+        </div>${windows}${git}${undecidable}
       </div>`;
     })
     .join("");

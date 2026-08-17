@@ -336,25 +336,47 @@ async function hasVersions(name) {
 // truncated version list makes "the earliest affected version" a fiction.
 // Seeks on the version string — it only has to be unique and stably ordered
 // for paging to be correct; real semver ordering is applied client-side after.
+//
+// `historyTotal` comes back alongside each row because truncation has to
+// survive the write. See writeVersions for why storing it per-vertex is the
+// shape the engine allows.
 export async function versionsForPackage(name) {
   const rows = await runQueryPagedKeyset(
     `MATCH (p:Package {id: ${packageId(name)}})-[:HAS_VERSION]->(v:Version) {{SEEK}} ` +
-      `RETURN v.version AS version, v.publishedAt AS publishedAt ORDER BY version`,
+      `RETURN v.version AS version, v.publishedAt AS publishedAt, v.historyTotal AS historyTotal ORDER BY version`,
     "v.version",
     "version"
   );
-  return rows
+  const versions = rows
     .filter((r) => r.version)
     .map((r) => ({ version: r.version, publishedAt: r.publishedAt ?? null }));
+  // The largest value any stored vertex carries. They should all agree, but a
+  // package re-ingested after publishing more releases will hold a mix, and
+  // the newest number is the right one.
+  const totals = rows.map((r) => Number(r.historyTotal)).filter((n) => Number.isFinite(n) && n > 0);
+  return { versions, historyTotal: totals.length ? Math.max(...totals) : null };
 }
 
 // One MERGE per version, as one HTTP request each: the engine rejects
 // UNWIND-batched MERGE and bare single-vertex MERGE, so a one-hop edge
 // pattern with both endpoints' properties inline is the only shape that
 // reliably writes a vertex here. Concurrency keeps that from being slow.
-export async function writeVersions(name, versions) {
+//
+// `historyTotal` — how many versions the registry actually published, which
+// may be more than the number being written — is stamped onto every vertex,
+// and that redundancy is deliberate. Truncation has to be recoverable on a
+// later read or it is not recoverable at all: the cap is applied at ingest
+// time, so a warm read that only counts stored rows cannot tell "this package
+// has 5 releases" from "this package has 35 and we kept 5", and would present
+// an analysis over a partial history as complete. The natural place for the
+// number is a property on the :Package vertex, but this engine cannot SET a
+// property on an existing vertex from a MERGE, and MERGE cannot be followed
+// by another clause — so the only field that reliably writes is one carried
+// inline on a vertex already being created. It costs one integer per row.
+export async function writeVersions(name, versions, historyTotal) {
   const pkgId = packageId(name);
   const pkgName = cypherString(name);
+  const total = Number.isFinite(historyTotal) ? historyTotal : versions.length;
   let written = 0;
   let failed = 0;
 
@@ -363,7 +385,8 @@ export async function writeVersions(name, versions) {
       await runQuery(
         `MERGE (p:Package {id: ${pkgId}, name: ${pkgName}})-[:HAS_VERSION]->` +
           `(v:Version {id: ${versionId(name, v.version)}, package: ${pkgName}, ` +
-          `version: ${cypherString(v.version)}, publishedAt: ${cypherString(v.publishedAt ?? "")}})`
+          `version: ${cypherString(v.version)}, publishedAt: ${cypherString(v.publishedAt ?? "")}, ` +
+          `historyTotal: ${total}})`
       );
       written++;
     } catch (err) {
@@ -375,12 +398,33 @@ export async function writeVersions(name, versions) {
   return { written, failed };
 }
 
+// Whether a stored history is partial, derived from what was written rather
+// than assumed from what came back.
+//
+// A stored history is not automatically a complete one: the cap is applied at
+// ingest time, so a read that only counts the rows it got cannot tell "this
+// package has 5 releases" from "this package has 35 and we kept 5". Getting
+// that wrong scores an advisory against a partial history and reports fewer
+// affected versions than there are — the one direction this project refuses to
+// be wrong in. Measured before `historyTotal` was stored: `cookie` capped to 5
+// of its 35 releases came back `truncated: false` and reported **0 of 5**
+// affected for GHSA-pxg6-pf52-xh8x, which over the full history affects **25**.
+//
+// `historyTotal` is null only for vertices written before it was recorded;
+// those are treated as complete, which is the pre-existing behaviour.
+export function deriveTruncation(storedCount, historyTotal) {
+  const total = Number.isFinite(historyTotal) && historyTotal > 0 ? historyTotal : storedCount;
+  return { truncated: total > storedCount, totalKnown: total };
+}
+
 // Loads a package's version history into the graph if it is not already
 // there. Returns the versions either way, so a cold call does not have to
 // read back what it just wrote.
 export async function ingestVersions(name, { maxVersions = DEFAULT_MAX_VERSIONS } = {}) {
   if (await hasVersions(name)) {
-    return { versions: await versionsForPackage(name), ingested: false, truncated: false, writeFailures: 0 };
+    const { versions, historyTotal } = await versionsForPackage(name);
+    const { truncated, totalKnown } = deriveTruncation(versions.length, historyTotal);
+    return { versions, ingested: false, truncated, writeFailures: 0, totalKnown };
   }
 
   const packument = await fetchPackument(name);
@@ -395,7 +439,7 @@ export async function ingestVersions(name, { maxVersions = DEFAULT_MAX_VERSIONS 
   const truncated = all.length > maxVersions;
   const kept = truncated ? all.slice(0, maxVersions) : all;
 
-  const { failed } = await writeVersions(name, kept);
+  const { failed } = await writeVersions(name, kept, all.length);
   return { versions: kept, ingested: true, truncated, writeFailures: failed, totalKnown: all.length };
 }
 
@@ -428,10 +472,18 @@ export async function analyzeVersions(name, { maxVersions = DEFAULT_MAX_VERSIONS
 
   const analyzed = advisories.map((adv) => {
     let skippedGitRanges = 0;
+    let undecidable = false;
     const affected = [];
     for (const v of sorted) {
       const r = isAffectedByRange(v.version, adv.ranges);
       skippedGitRanges = Math.max(skippedGitRanges, r.skippedGitRanges);
+      // An unparseable boundary means a window could not be evaluated, and an
+      // unevaluated window fails CLOSED — the version is reported unaffected.
+      // That is under-reporting, so it has to be visible rather than inferred
+      // from a suspiciously low count. Not observed on any of 416 real npm
+      // advisory boundaries sampled, but the signal is computed either way and
+      // dropping it is what would make it silent.
+      if (r.undecidable) undecidable = true;
       if (r.affected) affected.push(v);
     }
 
@@ -468,6 +520,7 @@ export async function analyzeVersions(name, { maxVersions = DEFAULT_MAX_VERSIONS
       fixedVersions,
       windowCount: adv.ranges.length,
       skippedGitRanges,
+      undecidable,
     };
   });
 
@@ -532,8 +585,10 @@ async function main() {
   );
   if (r.truncated) {
     console.log(
-      `NOTE: capped at --max-versions=${maxVersions} of ${r.totalKnownVersions} published, keeping the\n` +
-        `      most recent. "Earliest affected" below is the earliest among those, not ever.`
+      `NOTE: the graph holds ${r.versionCount} of ${r.totalKnownVersions} published version(s), newest first.\n` +
+        `      Every count below is over that subset — "earliest affected" is the earliest among\n` +
+        `      these, not ever, and older affected releases may exist outside them.` +
+        (r.ingested ? `\n      Raise --max-versions (currently ${maxVersions}) for full coverage.` : "")
     );
   }
   if (r.nonSemverCount > 0) {
@@ -576,6 +631,12 @@ async function main() {
     }
     if (a.skippedGitRanges > 0) {
       console.log(`    NOTE: ${a.skippedGitRanges} GIT-type range(s) skipped — not decidable by version`);
+    }
+    if (a.undecidable) {
+      console.log(
+        `    WARNING: this advisory has a version boundary that could not be parsed, so some\n` +
+          `             windows went unevaluated. The count above is a LOWER BOUND.`
+      );
     }
     console.log("");
   }

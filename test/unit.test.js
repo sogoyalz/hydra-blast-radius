@@ -14,7 +14,13 @@ import { createServer } from "node:http";
 import { packageId, maintainerId, versionId, cypherString, fetchWithTimeout } from "../src/hydra.js";
 import { levenshtein } from "../src/typosquat.js";
 import { groundTruthBlastRadius, precisionRecall } from "../src/eval.js";
-import { parseSemver, compareSemver, isAffectedByRange, extractVersionDates } from "../src/versions.js";
+import {
+  parseSemver,
+  compareSemver,
+  isAffectedByRange,
+  extractVersionDates,
+  deriveTruncation,
+} from "../src/versions.js";
 
 describe("vertex ids", () => {
   // HydraDB keys vertices on the integer id ALONE — labels do not scope
@@ -338,6 +344,46 @@ describe("isAffectedByRange", () => {
     const r = isAffectedByRange("1.0.0", git);
     assert.equal(r.affected, false);
     assert.equal(r.skippedGitRanges, 1);
+  });
+
+  // An unparseable boundary cannot open or close a window, so the version
+  // falls through as unaffected — the analysis fails CLOSED, which
+  // under-reports. That is survivable only because it is reported: the flag is
+  // what turns a wrong number into a stated lower bound. It was computed and
+  // then dropped by every caller until this test existed.
+  test("an unparseable boundary is flagged, not silently treated as safe", () => {
+    const bad = [{ type: "ECOSYSTEM", events: [{ introduced: "1.0" }, { fixed: "2.0" }] }];
+    const r = isAffectedByRange("1.5.0", bad);
+    assert.equal(r.affected, false, "an unevaluated window fails closed");
+    assert.equal(r.undecidable, true, "and must say so, or the low count looks authoritative");
+  });
+
+  test("a decidable range reports nothing undecidable", () => {
+    const good = [{ type: "SEMVER", events: [{ introduced: "1.0.0" }, { fixed: "2.0.0" }] }];
+    assert.equal(isAffectedByRange("1.5.0", good).undecidable, false);
+  });
+});
+
+describe("deriveTruncation", () => {
+  // The bug this exists to prevent, exactly: `cookie` was ingested capped at 5
+  // of its 35 releases, and every later read reported truncated:false and
+  // scored GHSA-pxg6-pf52-xh8x as "0 of 5 affected". Over the full history it
+  // affects 25. A partial history presented as complete turns a real finding
+  // into a clean bill of health.
+  test("a stored history smaller than the real total is truncated", () => {
+    assert.deepEqual(deriveTruncation(5, 35), { truncated: true, totalKnown: 35 });
+  });
+
+  test("a complete history is not flagged", () => {
+    assert.deepEqual(deriveTruncation(35, 35), { truncated: false, totalKnown: 35 });
+  });
+
+  test("a missing total falls back to the stored count rather than warning falsely", () => {
+    // Vertices written before historyTotal was recorded carry no total. They
+    // are treated as complete, which is the behaviour they already had.
+    assert.deepEqual(deriveTruncation(12, null), { truncated: false, totalKnown: 12 });
+    assert.deepEqual(deriveTruncation(12, undefined), { truncated: false, totalKnown: 12 });
+    assert.deepEqual(deriveTruncation(12, 0), { truncated: false, totalKnown: 12 });
   });
 });
 
