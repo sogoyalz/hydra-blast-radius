@@ -111,7 +111,7 @@ Reproduce with `node src/eval.js`-style ingestion of additional roots — any ~4
 
 **Proof the traversal is correct.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. This is a correctness gate on the ingest → store → traverse round trip, not a vulnerability-detection accuracy score — the distinction matters and is spelled out in [the eval section](#correctness-eval).
 
-**And proof the data itself is right.** That gate has a real limit: its ground truth is derived from this project's own crawl, so a crawler that learned the wrong edges would be graded against its own mistake and still score 1.00. `src/evalExternal.js` closes that loop by scoring against **deps.dev (Google's Open Source Insights)** — an independently resolved dependency graph for npm, built by Google's resolver with no connection to this crawler. Inverting its forward closures gives a true external answer to "who depends on X", and against it this project scores **recall 1.00, mean precision 0.94** — and every point of that precision gap is attributed by name, not hand-waved: it is `minimizer-webpack-plugin` reaching those targets through its `webpack` **peerDependency**, an edge this graph models deliberately (a compromised peer runs in your build exactly like a compromised dependency) and an install closure does not walk. See [validation against an independent source](#validation-against-an-independent-source).
+**And proof the data itself is right.** That gate has a real limit: its ground truth is derived from this project's own crawl, so a crawler that learned the wrong edges would be graded against its own mistake and still score 1.00. `src/evalExternal.js` closes that loop by scoring against **deps.dev (Google's Open Source Insights)** — an independently resolved dependency graph for npm, built by Google's resolver with no connection to this crawler. Inverting its forward closures gives a true external answer to "who depends on X", and against it this project scores **recall 1.00, mean precision 0.92** — and every point of that precision gap is attributed by name, not hand-waved: it is `minimizer-webpack-plugin` reaching those targets through its `webpack` **peerDependency**, an edge this graph models deliberately (a compromised peer runs in your build exactly like a compromised dependency) and an install closure does not walk. See [validation against an independent source](#validation-against-an-independent-source).
 
 **And the graph shows its work.** Click any node and the exact chain that exposes it lights up, reconstructed from the edges the traversal already returned — clicking `serve-static` on a `debug` blast radius traces `serve-static → send → debug`, each package depending on the next. Click a package reachable only through credentials and it says so explicitly, naming every maintainer who can publish to both it and the target. Click a maintainer and its entire publish reach lights up at once. Membership is the weak claim; the path is the evidence.
 
@@ -270,19 +270,21 @@ This script grades the data instead of the plumbing. Ground truth comes from **[
 externalDependents(X) = { P in graph : X ∈ depsdev_closure(P) }
 ```
 
-On the demo graph, against 118 independently resolved closures:
+On the demo graph, against 116 independently resolved closures (run 2026-08-17):
 
 | Target | deps.dev | HydraDB | P | R | OSV advisories |
 |---|---|---|---|---|---|
 | `ms` | 7 | 7 | 1.00 | **1.00** | 2 |
-| `debug` | 6 | 6 | 1.00 | **1.00** | 4 |
 | `@xtuc/long` | 10 | 11 | 0.91 | **1.00** | 0 |
 | `@webassemblyjs/floating-point-hex-parser` | 9 | 10 | 0.90 | **1.00** | 0 |
 | `@webassemblyjs/helper-api-error` | 9 | 10 | 0.90 | **1.00** | 0 |
+| `@webassemblyjs/helper-numbers` | 8 | 9 | 0.89 | **1.00** | 0 |
 
 **Recall is 1.00 — nothing an independent resolver knows to be exposed is ever missed.** That is the number that matters for a security tool: a missed dependent is an unreported compromise.
 
-Precision is 0.94, and the script does not wave at the gap — it attributes every case with evidence. All of it is one package, `minimizer-webpack-plugin`, reaching those targets through its `webpack` **peerDependency**. `src/ingest.js` merges `peerDependencies` into the dependency edges on purpose: a plugin that peers on `webpack` runs alongside whatever `webpack` ships, so a compromised peer is exactly as dangerous as a compromised dependency. deps.dev reports an *install* closure, where peers are not pulled in transitively. So this project deliberately reports more, and the script says which package, which peer edge, and why, rather than filing it under "version skew" and hoping.
+> Expect the precision figure to move slightly between runs, and not because anything changed here. Targets are picked at runtime by cross-referencing live OSV advisories, and deps.dev is a live service resolving current versions — so the five packages selected, and their closures, both drift. An earlier run of this same command scored **0.94**, on a target list that included `debug` (1.00) where this one has `@webassemblyjs/helper-numbers` (0.89) — the mean moved because the sample did, not because a traversal changed. Recall has been 1.00 on every run; that is the invariant worth holding this to, not the second decimal of precision.
+
+Precision is 0.92 here, and the script does not wave at the gap — it attributes every case with evidence. All of it is one package, `minimizer-webpack-plugin`, reaching those targets through its `webpack` **peerDependency**. `src/ingest.js` merges `peerDependencies` into the dependency edges on purpose: a plugin that peers on `webpack` runs alongside whatever `webpack` ships, so a compromised peer is exactly as dangerous as a compromised dependency. deps.dev reports an *install* closure, where peers are not pulled in transitively. So this project deliberately reports more, and the script says which package, which peer edge, and why, rather than filing it under "version skew" and hoping.
 
 Two sources of disagreement are separated and labelled rather than folded into the headline number: dependents deps.dev knows that a bounded crawl (`--depth`/`--max-nodes`) never ingested are a **collection** limit, not a traversal miss; dependents this graph has that deps.dev's single resolved version does not are peer edges or version skew, distinguished by checking the manifest.
 

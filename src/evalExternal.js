@@ -45,7 +45,7 @@
 // Usage: node src/evalExternal.js [--targets=a,b,c] [--max-packages=N]
 
 import { pathToFileURL } from "node:url";
-import { runQuery, fetchWithTimeout } from "./hydra.js";
+import { runQueryPagedKeyset, fetchWithTimeout } from "./hydra.js";
 import { blastRadius } from "./blastRadius.js";
 
 const DEPS_DEV = "https://api.deps.dev/v3alpha/systems/npm/packages";
@@ -175,7 +175,17 @@ async function osvAdvisoryCount(packageName) {
 async function main() {
   const { targets: targetArg, maxPackages } = parseArgs(process.argv.slice(2));
 
-  const rows = await runQuery("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+  // Paged past the engine's silent 1024-row cap. This set is the `universe`
+  // every comparison below is restricted to, so truncating it does not fail
+  // loudly — it quietly drops real dependents from deps.dev's expected set and
+  // reports a precision figure that is wrong for a reason nothing on screen
+  // explains. The demo graph is well under the cap; the 1,505-package graph
+  // the README describes scaling to is not.
+  const rows = await runQueryPagedKeyset(
+    "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
+    "p.name",
+    "name"
+  );
   const graphPackages = rows.map((r) => r.name).filter(Boolean);
   if (graphPackages.length === 0) {
     console.error("The graph is empty — run ./setup.sh first.");
