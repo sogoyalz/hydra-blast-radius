@@ -49,6 +49,23 @@ export function levenshtein(a, b) {
   return dp[a.length][b.length];
 }
 
+// Returns a real weekly download count, or null meaning "could not check".
+//
+// The distinction carries the whole weight of the verdict below, so it is not
+// cosmetic. Returning 0 for a failed lookup used to collapse both halves of
+// the ratio to zero, which produced a null ratio, which scored the candidate
+// "likely coincidence" — so an npm downloads outage silently downgraded a
+// genuine typosquat to background noise and the UI headlined "No likely
+// typosquats." Measured directly against a stubbed 500 and a refused
+// connection: `expres`/`express` went from "high" to "likely coincidence" in
+// both. That is the same under-reporting-reads-as-safety failure this project
+// refuses everywhere else, and it was hiding behind an argument that the
+// number "only feeds a ratio".
+//
+// A 404 is deliberately NOT a failure: npm answers that way for a package it
+// has no download record for, which is a real answer of zero and is the
+// strongest signal a fresh squat can give. Only a transport error or a server
+// error means "unknown".
 async function fetchWeeklyDownloads(name) {
   try {
     // Bounded well under the frontend's own timeout: this runs once per
@@ -59,11 +76,12 @@ async function fetchWeeklyDownloads(name) {
       {},
       5_000
     );
-    if (!res.ok) return 0;
+    if (res.status === 404) return 0; // no download record — a real zero
+    if (!res.ok) return null; // 5xx and friends — we do not know
     const body = await res.json();
     return body.downloads ?? 0;
   } catch {
-    return 0;
+    return null; // timeout, DNS, refused connection — we do not know
   }
 }
 
@@ -124,8 +142,24 @@ export async function findTyposquats(candidateNames, maxDistance = 2) {
       fetchWeeklyDownloads(suspect.candidate),
       fetchWeeklyDownloads(suspect.resembles),
     ]);
+    // Either lookup failing means the confirming signal is missing, which is a
+    // different thing from the signal saying "harmless" — and it must not be
+    // allowed to read as the latter. The name is still suspiciously close to a
+    // popular package; all that is unknown is whether download volume backs
+    // that up. Reported as its own verdict so it stays visible instead of
+    // being filed under coincidence.
+    suspect.downloadsUnavailable = candidateDownloads === null || popularDownloads === null;
     suspect.candidateWeeklyDownloads = candidateDownloads;
     suspect.resemblesWeeklyDownloads = popularDownloads;
+
+    if (suspect.downloadsUnavailable) {
+      suspect.downloadRatio = null;
+      suspect.suspicion = "unconfirmed";
+      continue;
+    }
+
+    // A genuine zero on the popular side makes the comparison meaningless
+    // rather than unknown: nothing is impersonating a package nobody installs.
     suspect.downloadRatio = popularDownloads === 0 ? null : candidateDownloads / popularDownloads;
     suspect.suspicion =
       suspect.downloadRatio === null || suspect.downloadRatio >= 1
@@ -137,7 +171,9 @@ export async function findTyposquats(candidateNames, maxDistance = 2) {
             : "low";
   }
 
-  const suspicionRank = { high: 0, medium: 1, low: 2, "likely coincidence": 3 };
+  // "unconfirmed" ranks directly below "high" because that is the honest place
+  // for it: it could have been a high and nothing ruled that out.
+  const suspicionRank = { high: 0, unconfirmed: 1, medium: 2, low: 3, "likely coincidence": 4 };
   return suspects.sort(
     (a, b) => suspicionRank[a.suspicion] - suspicionRank[b.suspicion] || a.distance - b.distance
   );
@@ -196,12 +232,29 @@ async function main() {
 
   console.log(`\n${suspects.length} candidate(s) (edit distance <= ${maxDistance} from a popular package):\n`);
   for (const s of suspects) {
+    if (s.downloadsUnavailable) {
+      console.log(
+        `  [UNCONFIRMED] "${s.candidate}" (distance ${s.distance} from "${s.resembles}") — the npm\n` +
+          `                downloads API could not be reached, so this was NOT cleared. The name is\n` +
+          `                close to a popular package and nothing checked whether volume backs it up.`
+      );
+      continue;
+    }
     const ratioText =
       s.downloadRatio === null
         ? "n/a"
         : `${(s.downloadRatio * 100).toFixed(3)}% of "${s.resembles}"'s downloads`;
     console.log(
       `  [${s.suspicion.toUpperCase()}] "${s.candidate}" (distance ${s.distance} from "${s.resembles}") — ${s.candidateWeeklyDownloads} weekly downloads vs ${s.resemblesWeeklyDownloads} for "${s.resembles}" (${ratioText})`
+    );
+  }
+
+  // A scan that could not confirm anything must not end on a reassuring note.
+  const unconfirmed = suspects.filter((s) => s.downloadsUnavailable).length;
+  if (unconfirmed > 0) {
+    console.log(
+      `\nNOTE: ${unconfirmed} candidate(s) could not be checked against download volume because the\n` +
+        `      npm downloads API did not answer. They are unresolved, not cleared — re-run to confirm.`
     );
   }
 }

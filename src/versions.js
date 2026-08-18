@@ -270,13 +270,19 @@ export function isAffectedByRange(version, ranges) {
 // Every advisory OSV holds for this package, flattened to the shape the
 // analysis needs.
 //
-// Failure here is NOT reported as "no advisories". typosquat.js can default a
-// failed download lookup to zero because that number only feeds a ratio, but
-// this call IS the finding: rendering "0 known vulnerabilities" because the
-// network hiccupped tells a reader the package is clean when nothing was
-// actually checked, which is the same under-reporting-reads-as-safety failure
-// this project refuses everywhere else. The error is tagged and propagated so
-// the caller can say "could not check" instead.
+// Failure here is NOT reported as "no advisories". Rendering "0 known
+// vulnerabilities" because the network hiccupped tells a reader the package is
+// clean when nothing was actually checked, which is the same
+// under-reporting-reads-as-safety failure this project refuses everywhere
+// else. The error is tagged and propagated so the caller can say "could not
+// check" instead.
+//
+// This comment used to argue the rule applied here but not in typosquat.js,
+// on the grounds that its download lookup "only feeds a ratio". That was
+// wrong, and the same bug was sitting there: a failed lookup returned zero,
+// which made the ratio null, which scored the candidate "likely coincidence" —
+// the ratio IS the verdict there too. Both now distinguish "checked and clear"
+// from "could not check".
 export async function fetchOsvAdvisories(packageName) {
   let res;
   try {

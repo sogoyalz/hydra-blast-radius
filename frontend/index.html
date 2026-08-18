@@ -318,6 +318,9 @@
   .badge.high { background: var(--error); color: #fff; }
   .badge.medium { background: var(--hop1); color: #000; }
   .badge.low, .badge.coincidence { background: #2a3746; color: var(--muted); }
+  /* Unresolved, not cleared — so it reads as a caution, not as one of the
+     dismissed rows it would otherwise sit beside unstyled. */
+  .badge.unconfirmed { background: var(--hop1); color: #000; }
   #datalist-hint { font-size: 11px; color: var(--muted); }
   /* Example shortcuts on the empty state. Styled as quiet secondary actions,
      not as a second call-to-action competing with Compute. */
@@ -618,24 +621,53 @@ async function loadTyposquats() {
     // Lead with the verdict. Edit distance alone flags plenty of innocent
     // names; the download-ratio signal is what separates a real typosquat
     // from a coincidence, so the headline is the count that actually matters.
-    const actionable = suspects.filter((s) => s.suspicion === "high" || s.suspicion === "medium");
-    const verdict = actionable.length
-      ? `<strong style="color:var(--error)">${actionable.length} likely typosquat${actionable.length === 1 ? "" : "s"}</strong> found.`
-      : `<strong style="color:var(--hopN)">No likely typosquats.</strong>`;
-    // Only mention the cleared names when there are some — "cleared 0 of
-    // them" reads like a bug rather than a result.
-    const cleared = suspects.length - actionable.length;
+    //
+    // A candidate whose download lookup failed is NOT cleared, and the headline
+    // has to say so. Folding those into the "no likely typosquats" branch is
+    // how an npm downloads outage used to turn a real squat into a green
+    // all-clear: the name is still close to a popular package, only the
+    // confirming signal is missing.
+    const confirmed = suspects.filter((s) => s.suspicion === "high" || s.suspicion === "medium");
+    const unconfirmed = suspects.filter((s) => s.downloadsUnavailable);
+    let verdict;
+    if (confirmed.length) {
+      verdict = `<strong style="color:var(--error)">${confirmed.length} likely typosquat${confirmed.length === 1 ? "" : "s"}</strong> found.`;
+    } else if (unconfirmed.length) {
+      verdict = `<strong style="color:var(--hop1)">${unconfirmed.length} name${unconfirmed.length === 1 ? "" : "s"} could not be checked.</strong>`;
+    } else {
+      verdict = `<strong style="color:var(--hopN)">No likely typosquats.</strong>`;
+    }
+    // Only names actually cleared by download volume count as cleared — the
+    // unconfirmed ones are unresolved, and counting them here would restate
+    // the same false reassurance one line lower.
+    const cleared = suspects.length - confirmed.length - unconfirmed.length;
     const clearedText = cleared > 0
       ? ` Download volume cleared ${cleared} other${cleared === 1 ? "" : "s"} as unlikely impersonation.`
       : "";
+    const unconfirmedText = unconfirmed.length
+      ? ` <span style="color:var(--hop1)">${unconfirmed.length} could not be checked against download
+         volume (npm's downloads API did not answer) and ${unconfirmed.length === 1 ? "is" : "are"}
+         unresolved rather than cleared.</span>`
+      : "";
     const summary = `<div style="font-size:12.5px;line-height:1.6;margin-bottom:12px;color:var(--muted)">
       ${verdict} ${suspects.length} name${suspects.length === 1 ? "" : "s"} sat within edit distance 2
-      of a popular package.${clearedText}
+      of a popular package.${clearedText}${unconfirmedText}
     </div>`;
 
     container.innerHTML = summary + suspects
       .map((s) => {
         const cls = s.suspicion === "likely coincidence" ? "coincidence" : s.suspicion;
+        // The download counts are null when the lookup failed, so this row has
+        // to be built before any .toLocaleString() runs — calling it on null
+        // throws and takes the whole panel down with it.
+        if (s.downloadsUnavailable) {
+          return `<div class="suspect">
+            <span class="badge unconfirmed">unconfirmed</span>
+            <strong>${esc(s.candidate)}</strong> vs <strong>${esc(s.resembles)}</strong> (distance ${esc(s.distance)})<br/>
+            <span style="color:var(--hop1)">Download volume could not be checked, so this was not
+            cleared.</span>
+          </div>`;
+        }
         // A convincing typosquat sits several orders of magnitude below the
         // package it imitates, so two decimal places round it to a flat
         // "0.00%" — which reads as missing data rather than as the strongest

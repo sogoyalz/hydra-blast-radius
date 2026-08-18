@@ -224,6 +224,56 @@ describe("typosquat threshold handling", () => {
     const found = await findTyposquats(["expres"], NaN);
     assert.equal(found.length, 0, "NaN silently matches nothing");
   });
+
+  // A failed download lookup must not read as "harmless". Returning 0 for a
+  // failed fetch used to collapse both sides of the ratio to zero, yielding a
+  // null ratio, which scored "likely coincidence" — so an npm downloads outage
+  // downgraded a real squat to noise and the UI headlined "No likely
+  // typosquats." Measured on `expres`/`express`: "high" when npm answers,
+  // "likely coincidence" against a stubbed 500 and against a refused
+  // connection. Stubbing fetch keeps this offline like the rest of the suite.
+  test("an unreachable downloads API yields 'unconfirmed', never 'likely coincidence'", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    try {
+      const [s] = await findTyposquats(["expres"], 2);
+      assert.ok(s, "the name-distance filter still produces the candidate");
+      assert.equal(s.suspicion, "unconfirmed");
+      assert.equal(s.downloadsUnavailable, true);
+      assert.notEqual(s.suspicion, "likely coincidence");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a 404 from the downloads API is a real zero, not an unknown", async () => {
+    // npm answers 404 for a package it has no download record for. That is the
+    // strongest signal a freshly-published squat can give, so it must stay a
+    // confirmed finding rather than degrading to "unconfirmed".
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      // The candidate's URL ends in /expres; the popular one ends in /express,
+      // which also *contains* "expres" — so match on the path end, not a
+      // substring, or both requests take the same branch.
+      const is404 = /\/expres$/.test(String(url));
+      const status = is404 ? 404 : 200;
+      return {
+        ok: status >= 200 && status < 300, // derived, not hardcoded
+        status,
+        headers: new Map(),
+        text: async () => JSON.stringify({ downloads: 100000 }),
+      };
+    };
+    try {
+      const [s] = await findTyposquats(["expres"], 2);
+      assert.equal(s.downloadsUnavailable, false, "404 is an answer, not a failure");
+      assert.equal(s.candidateWeeklyDownloads, 0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
 });
 
 describe("groundTruthBlastRadius", () => {
