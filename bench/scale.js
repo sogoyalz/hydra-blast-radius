@@ -19,7 +19,7 @@
 
 import { crawl, writeEdges, writeMaintainers } from "../src/ingest.js";
 import { blastRadiusNative, blastRadiusFanout } from "../src/blastRadius.js";
-import { runQuery, runQueryPagedKeyset } from "../src/hydra.js";
+import { runQuery, runQueryPagedKeyset, runQueriesConcurrent, packageId } from "../src/hydra.js";
 
 // Chosen because they still have deep dependency trees. Modern packages bundle
 // their dependencies and resolve to almost nothing — `next` pulls 1 package,
@@ -68,20 +68,52 @@ async function unpagedPackageCount() {
   return rows.length;
 }
 
-// Ranks packages by how many others depend on them directly. Density, not
-// popularity, is what saturates a path procedure.
+// Ranks packages by how many others depend on them directly.
+//
+// Counted one package at a time rather than by paging a single (dependent,
+// dependency) edge query, and the reason is the bug this whole file is about.
+// Those pair rows repeat the dependency name once per dependent, so the seek
+// key is not unique per row — and runQueryPagedKeyset says plainly that a
+// non-unique key loses every row sharing it across a page boundary. An earlier
+// version of this function did exactly that: invisible on the 120-package demo
+// graph (199 edge rows, one page, no boundary) and quietly wrong at the ~3,000
+// rows this script actually runs at, undercutting the in-degree of whichever
+// packages straddled a boundary. A benchmark that exists to expose silent
+// truncation is the last place to hide some.
+//
+// Per-package counts are id-scoped and bounded by in-degree, so they need no
+// paging — but a package with more than PAGE_SIZE direct dependents would hit
+// the row cap here too, so that is detected and reported rather than assumed
+// away.
 async function topByInDegree(n) {
-  const rows = await runQueryPagedKeyset(
-    "MATCH (a:Package)-[:DEPENDS_ON]->(b:Package) {{SEEK}} RETURN a.name AS dependent, b.name AS name ORDER BY name",
-    "b.name",
-    "name"
+  const names = (
+    await runQueryPagedKeyset(
+      "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
+      "p.name",
+      "name"
+    )
+  ).map((r) => r.name).filter(Boolean);
+
+  const counts = await runQueriesConcurrent(
+    names.map(
+      (name) => `MATCH (b:Package {id: ${packageId(name)}})-[:REQUIRED_BY]->(a:Package) RETURN DISTINCT a.name AS name`
+    )
   );
-  const inDegree = new Map();
-  for (const r of rows) {
-    if (!r.name) continue;
-    inDegree.set(r.name, (inDegree.get(r.name) ?? 0) + 1);
+
+  const atCap = [];
+  const inDegree = names.map((name, i) => {
+    const deg = counts[i].length;
+    if (deg >= 1024) atCap.push(name);
+    return { name, deg };
+  });
+  if (atCap.length > 0) {
+    console.log(
+      `  NOTE: ${atCap.length} package(s) returned a full 1024-row dependent list, so their\n` +
+        `        in-degree is a lower bound and this ranking may be understated: ${atCap.slice(0, 5).join(", ")}`
+    );
   }
-  return [...inDegree.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([name, deg]) => ({ name, deg }));
+
+  return inDegree.sort((a, b) => b.deg - a.deg).slice(0, n);
 }
 
 async function main() {
