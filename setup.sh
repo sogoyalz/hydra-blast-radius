@@ -177,7 +177,8 @@ else
   node src/ingest.js express --depth=4 --max-nodes=250
   node src/ingest.js webpack --depth=3 --max-nodes=150
   # "expres" is a real package published to npm — a genuine typosquat of
-  # express, with ~6k weekly downloads against express's ~127M. It is
+  # express, sitting ~5 orders of magnitude below it in weekly downloads
+  # (2,896 vs 109,881,741 as of 2026-08-18; both move weekly). It is
   # ingested so the typosquat panel has an actual positive to show instead
   # of an empty result. Nothing synthetic: the detector is being pointed at
   # a real squatted name that someone really registered. It has no

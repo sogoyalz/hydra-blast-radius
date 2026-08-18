@@ -40,14 +40,16 @@ YIELD path RETURN path
 
 Because it returns *paths* rather than endpoints, one round trip carries everything a fan-out implementation has to go back and ask for — the endpoint of each path is an exposed package, its length is the hop distance, and its relationships are the edges. `src/blastRadius.js` keeps the portable variable-length-`MATCH` version as `blastRadiusFanout()` and falls back to it automatically if the procedure is unavailable or hits its path cap, so the demo still runs against a build without it. The two produce **identical node sets, edge sets and hop distances** on every package in the demo graph — verified, not assumed:
 
-| Target | Native | Fan-out fallback | End-to-end speedup |
-|---|---|---|---|
-| `debug` | **1 query** | 10 queries | **29x** |
-| `qs` | **1 query** | 5 queries | **13x** |
-| `send` | **1 query** | 5 queries | **16x** |
-| `body-parser` | **1 query** | 4 queries | **15x** |
+| Target | Native | Fan-out fallback | Median speedup | Range over 7 runs |
+|---|---|---|---|---|
+| `debug` | **1 query** | 10 queries | **16x** | 12.8x – 21.3x |
+| `qs` | **1 query** | 5 queries | **10x** | 8.0x – 12.3x |
+| `send` | **1 query** | 5 queries | **11x** | 8.0x – 15.3x |
+| `body-parser` | **1 query** | 4 queries | **9x** | 4.9x – 12.7x |
 
-*Measured on the 120-package demo graph `./setup.sh` builds. It does not hold at every scale, and the reason is worth reading before trusting the number: see [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one).*
+*Measured on the 120-package demo graph `./setup.sh` builds, median of 7 trials per target.*
+
+**The range column is there because a single timing is not reproducible, and quoting one as if it were would be the same kind of overclaim this project spends the rest of its time avoiding.** The same target measured 4.9x and 12.7x on different runs of the same loop against the same graph; an earlier single-run measurement of this table read as high as 29x. The query-count column is the durable claim — that one is structural and identical on every run — and the honest latency summary is **roughly 9–16x typical, occasionally as low as 5x**. It also does not hold at every scale, for reasons worth reading before trusting any of it: see [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one).
 
 Calling it at all took some finding, and both discoveries are the kind that cost an afternoon:
 
@@ -105,7 +107,7 @@ Three of the six densest packages in the graph saturate the fast path. The guard
 
 **End to end through the API**, `/api/blast-radius?name=es-errors` reports `engine: "variable-length MATCH"` and `fallbackReason: "path-ceiling"`, and the UI says the radius is complete rather than truncated — a saturated ceiling means the fast path *would have* under-reported this specific answer, which is worth saying out loud on a security tool.
 
-**And the honest cost.** `coreQueryMs` goes from 4–6ms on the demo graph to 0.6–1.4s here, and a saturating target costs ~2s on the fallback traversal plus several seconds more to assemble the drawing. Work is proportional to paths enumerated, not to answer size. The 13–29x speedup in the table above is a demo-graph number and does not survive to this scale; the correctness guarantee does.
+**And the honest cost.** `coreQueryMs` goes from 4–6ms on the demo graph to 0.6–1.4s here, and a saturating target costs ~2s on the fallback traversal plus several seconds more to assemble the drawing. Work is proportional to paths enumerated, not to answer size. The 9–16x speedup in the table above is a demo-graph number and does not survive to this scale; the correctness guarantee does.
 
 Reproduce with `node src/eval.js`-style ingestion of additional roots — any ~40 npm roots will do it, since the thresholds are properties of the engine, not of the packages chosen.
 
@@ -162,7 +164,7 @@ Then open `http://127.0.0.1:8787`, type a package name that's already in the gra
 
 **Demo-ready example:** `./setup.sh` ingests `express --depth=4 --max-nodes=250` and `webpack --depth=3 --max-nodes=150` into one graph — **120 real packages**, including [`qs`](https://github.com/advisories?query=qs), which has 7 real GHSA advisories (prototype pollution, DoS). `node src/blastRadius.js qs` correctly returns `body-parser` and `express` as exposed, via the real `express -> body-parser -> qs` dependency chain — a genuine incident, not a synthetic example.
 
-It also ingests `expres` — a real package someone published to npm, a genuine typosquat of `express` with ~6k weekly downloads against express's ~127M — so the typosquat scanner has an actual positive to find rather than an empty result. Nothing about it is synthetic; it is a squatted name that really exists.
+It also ingests `expres` — a real package someone published to npm, a genuine typosquat of `express` sitting about five orders of magnitude below it in weekly downloads (2,896 vs 109,881,741 when last checked on 2026-08-18) — so the typosquat scanner has an actual positive to find rather than an empty result. Nothing about it is synthetic; it is a squatted name that really exists. Those two counts are live figures and move every week; the ratio is the part that stays put.
 
 **Deep links.** Any view is addressable, which makes a specific finding quotable rather than a list of steps to reproduce:
 
@@ -316,16 +318,18 @@ The UI reports two figures, deliberately kept apart. **`coreQueryMs`** is the si
 
 ### On cost
 
-The brief's fourth eval axis, alongside precision/recall/latency. There's no metered bill to report here — this runs against a self-hosted, single-node alpha image with no usage-based pricing exposed — so the honest proxy is query cost, not dollar cost: **one `algo.SSpaths` call replaces up to 10 fan-out queries** (measured 13–29x fewer round trips end-to-end; see the table above), and that reduction is exactly what a metered deployment would bill for, since HydraDB's storage/compute-disaggregated architecture prices on requests against the object store, not on data volume held. The other place cost shows up is ingest: `src/typosquat.js` deliberately uses a static `POPULAR_PACKAGES` reference list rather than a live popularity API call per candidate, and `src/ingest.js` bounds every crawl with `--depth`/`--max-nodes` — both are cost controls as much as they are demo-stability controls.
+The brief's fourth eval axis, alongside precision/recall/latency. There's no metered bill to report here — this runs against a self-hosted, single-node alpha image with no usage-based pricing exposed — so the honest proxy is query cost, not dollar cost: **one `algo.SSpaths` call replaces up to 10 fan-out queries** (a 4–10x reduction in round trips, worth a median 9–16x end to end; see the table above), and that reduction is exactly what a metered deployment would bill for, since HydraDB's storage/compute-disaggregated architecture prices on requests against the object store, not on data volume held. The other place cost shows up is ingest: `src/typosquat.js` deliberately uses a static `POPULAR_PACKAGES` reference list rather than a live popularity API call per candidate, and `src/ingest.js` bounds every crawl with `--depth`/`--max-nodes` — both are cost controls as much as they are demo-stability controls.
 
 ### Typosquat detection
 
 `node src/typosquat.js` scans every package name currently in the graph, flags anything within edit distance 2 of a popular reference package (`src/typosquat.js`'s `POPULAR_PACKAGES`), and confirms suspicion using live npm weekly download counts — a genuine typosquat has far fewer downloads than the package it resembles. On the demo graph:
 
 ```
-[HIGH] "expres" (distance 1 from "express") — 6,186 weekly downloads vs 127,296,948
-       for "express" (0.005% of "express"'s downloads)
+[HIGH] "expres" (distance 1 from "express") — 2896 weekly downloads vs 109881741
+       for "express" (0.003% of "express"'s downloads)
 ```
+
+The two counts come from npm's live downloads API, so re-running this will print different figures than the sample above (captured 2026-08-18) — that is the integration working, not drifting docs. What does not move is the shape of the finding: a name one edit away, orders of magnitude below the package it imitates.
 
 This is deliberately two-signal, because each signal alone is wrong in a different way:
 
