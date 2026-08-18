@@ -14,6 +14,7 @@ import { createServer } from "node:http";
 import { packageId, maintainerId, versionId, cypherString, fetchWithTimeout } from "../src/hydra.js";
 import { levenshtein, findTyposquats } from "../src/typosquat.js";
 import { groundTruthBlastRadius, precisionRecall } from "../src/eval.js";
+import { combineChannels } from "../src/server.js";
 import {
   parseSemver,
   compareSemver,
@@ -471,6 +472,70 @@ describe("extractVersionDates", () => {
     // A date left behind by a removed release is not a version anyone can install.
     const out = extractVersionDates({ time: { "9.9.9": "2020-01-01" }, versions: {} });
     assert.deepEqual(out, []);
+  });
+});
+
+describe("combineChannels", () => {
+  // This produces the number the whole project leads with — the "36" against a
+  // dependency scanner's "1" — and until it was pulled out of the request
+  // handler it had no test at all. The union is where the headline figure can
+  // be wrong without any query being wrong.
+  const nodes = (...pairs) => [{ name: "target", hop: 0 }, ...pairs.map(([name, hop]) => ({ name, hop }))];
+
+  test("the three buckets partition the union and sum to the total", () => {
+    // a,b exposed by dependencies; b,c reachable by credentials => b is both.
+    const { unifiedExposure: u } = combineChannels("target", nodes(["a", 1], ["b", 2]), ["b", "c"]);
+    assert.equal(u.viaDependencyOnly, 1); // a
+    assert.equal(u.viaBoth, 1); // b
+    assert.equal(u.viaMaintainerOnly, 1); // c
+    assert.equal(u.total, 3);
+    assert.equal(u.viaDependencyOnly + u.viaBoth + u.viaMaintainerOnly, u.total);
+  });
+
+  test("a package reachable through both channels is counted once, not twice", () => {
+    // The failure the table's arithmetic would show first: naive addition of
+    // "exposed by deps" + "reachable by credentials" double-counts the overlap.
+    const { unifiedExposure: u } = combineChannels("target", nodes(["a", 1], ["b", 1]), ["a", "b"]);
+    assert.equal(u.total, 2, "two packages, both reachable twice over");
+    assert.equal(u.viaBoth, 2);
+    assert.equal(u.viaDependencyOnly, 0);
+    assert.equal(u.viaMaintainerOnly, 0);
+  });
+
+  test("the target never counts as its own blast radius", () => {
+    // It is hop 0 in the node list, and shared publish rights trivially reach
+    // it — both would inflate the total by one if not excluded.
+    const { unifiedExposure: u } = combineChannels("target", nodes(["a", 1]), ["target", "a"]);
+    assert.equal(u.total, 1);
+    assert.equal(u.viaMaintainerOnly, 0);
+  });
+
+  test("the credential-only channel is what the headline gap measures", () => {
+    // body-parser's real shape: almost nothing through dependencies, a great
+    // deal through shared publish rights.
+    const { unifiedExposure: u, missedByDeps } = combineChannels(
+      "body-parser",
+      nodes(["express", 1]),
+      ["express", "cookie", "fresh", "send"]
+    );
+    assert.equal(u.viaDependencyOnly, 0);
+    assert.equal(u.viaBoth, 1); // express, reachable both ways
+    assert.equal(u.viaMaintainerOnly, 3); // invisible to a dependency scanner
+    assert.equal(u.total, 4);
+    assert.deepEqual(missedByDeps.sort(), ["cookie", "fresh", "send"]);
+  });
+
+  test("no credential channel leaves the dependency answer untouched", () => {
+    const { unifiedExposure: u } = combineChannels("target", nodes(["a", 1], ["b", 2]), []);
+    assert.equal(u.total, 2);
+    assert.equal(u.viaDependencyOnly, 2);
+    assert.equal(u.viaMaintainerOnly, 0);
+    assert.equal(u.viaBoth, 0);
+  });
+
+  test("an isolated package exposes nothing", () => {
+    const { unifiedExposure: u } = combineChannels("target", nodes(), []);
+    assert.equal(u.total, 0);
   });
 });
 

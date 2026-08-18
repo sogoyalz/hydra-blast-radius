@@ -70,6 +70,45 @@ function parseDepth(raw) {
   return { ok: true, depth: Math.max(1, Math.min(10, depth)) };
 }
 
+// Combines the two attack channels into the number this project leads with.
+//
+// The two are traversed separately because the engine rejects mixing
+// relationship types in one variable-length pattern ("relationship pattern
+// must have exactly one type"), so the union has to be assembled here. That
+// makes this set arithmetic — no extra queries, nothing against the latency
+// figures — but it also makes it the one place where the headline figure can
+// be wrong without any query being wrong.
+//
+// Pulled out of the request handler so it can actually be tested. It was
+// inline, which is precisely why the project's most-quoted number had no test
+// behind it: `total`, and the three buckets under it, are what every table in
+// the README reports.
+//
+// The buckets partition the union — each exposed package lands in exactly one
+// of dependency-only, credential-only, or both — so they sum to `total` and a
+// package reachable through both channels is counted once, not twice.
+export function combineChannels(target, nodes, reach) {
+  // hop 0 is the target itself, not something it exposes.
+  const exposedByDeps = new Set(nodes.filter((n) => n.hop > 0).map((n) => n.name));
+  const reachSet = new Set(reach);
+  reachSet.delete(target); // a package is not its own blast radius
+
+  const missedByDeps = [...reachSet].filter((p) => !exposedByDeps.has(p));
+  const viaBoth = [...exposedByDeps].filter((p) => reachSet.has(p));
+  const viaDependencyOnly = [...exposedByDeps].filter((p) => !reachSet.has(p));
+  const unified = new Set([...exposedByDeps, ...reachSet]);
+
+  return {
+    missedByDeps,
+    unifiedExposure: {
+      total: unified.size,
+      viaDependencyOnly: viaDependencyOnly.length,
+      viaMaintainerOnly: missedByDeps.length,
+      viaBoth: viaBoth.length,
+    },
+  };
+}
+
 async function allIngestedPackageNames() {
   // Paged: past 1024 packages an unpaged query silently returns 1024, which
   // would quietly shrink the autocomplete list and, worse, hand the typosquat
@@ -161,33 +200,14 @@ async function handleApi(req, res, url) {
     // dependency blast radius because the two answers can differ wildly —
     // and the gap is the whole point.
     const { groups, reach } = await sharedMaintainerReach(name);
-    const exposedByDeps = new Set(result.nodes.filter((n) => n.hop > 0).map((n) => n.name));
-    const reachSet = new Set(reach);
-    reachSet.delete(name); // a package is not its own blast radius
-    const missedByDeps = [...reachSet].filter((p) => !exposedByDeps.has(p));
-
-    // The two channels are traversed separately because HydraDB's query
-    // engine rejects mixing relationship types in one variable-length
-    // pattern ("relationship pattern must have exactly one type"). Combining
-    // them here is the point: a compromise spreads through code you pull in
-    // AND through credentials that can push code to you, and only the union
-    // is the honest answer. Set arithmetic over results already fetched — no
-    // extra queries, so this costs nothing against the latency figures.
-    const viaBoth = [...exposedByDeps].filter((p) => reachSet.has(p));
-    const viaDependencyOnly = [...exposedByDeps].filter((p) => !reachSet.has(p));
-    const unified = new Set([...exposedByDeps, ...reachSet]);
+    const { missedByDeps, unifiedExposure } = combineChannels(name, result.nodes, reach);
 
     // coreQueryMs (the traversal that answers the question) is reported
     // separately from totalMs (which also covers laying out the picture).
     return sendJson(res, 200, {
       ...result,
       maintainers: { groups, reach, missedByDeps },
-      unifiedExposure: {
-        total: unified.size,
-        viaDependencyOnly: viaDependencyOnly.length,
-        viaMaintainerOnly: missedByDeps.length,
-        viaBoth: viaBoth.length,
-      },
+      unifiedExposure,
       totalMs: Date.now() - start,
     });
   }

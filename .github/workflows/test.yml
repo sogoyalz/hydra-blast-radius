@@ -39,7 +39,7 @@ jobs:
         run: |
           node -e '
             const fs = require("fs"), path = require("path");
-            const roots = ["src", "frontend", "test"];
+            const roots = ["src", "frontend", "test", "bench"];
             let bad = 0;
             for (const dir of roots) {
               for (const name of fs.readdirSync(dir)) {

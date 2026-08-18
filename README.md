@@ -47,9 +47,13 @@ Because it returns *paths* rather than endpoints, one round trip carries everyth
 | `send` | **1 query** | 5 queries | **11x** | 8.0x – 15.3x |
 | `body-parser` | **1 query** | 4 queries | **9x** | 4.9x – 12.7x |
 
-*Measured on the 120-package demo graph `./setup.sh` builds, median of 7 trials per target.*
+*Measured on the 120-package demo graph `./setup.sh` builds, median of 7 trials per target. Reproduce it yourself — the measurement ships with the project:*
 
-**The range column is there because a single timing is not reproducible, and quoting one as if it were would be the same kind of overclaim this project spends the rest of its time avoiding.** The same target measured 4.9x and 12.7x on different runs of the same loop against the same graph; an earlier single-run measurement of this table read as high as 29x. The query-count column is the durable claim — that one is structural and identical on every run — and the honest latency summary is **roughly 9–16x typical, occasionally as low as 5x**. It also does not hold at every scale, for reasons worth reading before trusting any of it: see [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one).
+```bash
+node bench/speedup.js --trials=7
+```
+
+**The range column is there because a single timing is not reproducible, and quoting one as if it were would be the same kind of overclaim this project spends the rest of its time avoiding.** The same target measured 4.9x and 12.7x on different runs of that script against the same graph; an earlier single-run measurement of this table read as high as 29x. Your own run will land somewhere else again — that is the honest shape of the number, which is why the script prints the range and not just the middle. The query-count column is the durable claim — that one is structural and identical on every run — and the honest latency summary is **roughly 9–16x typical, occasionally as low as 5x**. It also does not hold at every scale, for reasons worth reading before trusting any of it: see [the path ceiling](#the-path-ceiling-and-why-the-fast-path-is-not-always-the-right-one).
 
 Calling it at all took some finding, and both discoveries are the kind that cost an afternoon:
 

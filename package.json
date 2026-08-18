@@ -16,6 +16,7 @@
     "eval:external": "node src/evalExternal.js",
     "typosquat": "node src/typosquat.js",
     "versions": "node src/versions.js",
+    "bench": "node bench/speedup.js",
     "dev": "node src/server.js"
   }
 }
