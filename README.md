@@ -90,30 +90,38 @@ That requires a key unique per row, which shapes the queries. The blast-radius t
 
 The consequence is worth stating plainly, because it cuts against the speedup table above: **on a large graph the popular packages — the ones whose blast radius you most want — are exactly the ones that fall back to the slower, exhaustive path.** The single-query result is real, and it is what the demo graph runs on; it is not a claim about every graph.
 
-#### Reproduced on demand, at 1,505 packages
+#### Reproduced on demand, past the cap
 
-The 120-package demo graph never triggers any of this, so none of it is visible in the demo — which is a fair reason to be sceptical of it. Ingesting ~40 more npm roots brings the graph to **1,505 packages / 3,444 dependency edges**, and every mechanism above fires:
+The 120-package demo graph never triggers any of this, so none of it is visible in the demo — which is a fair reason to be sceptical of it. `bench/scale.js` ingests deep-tree npm roots until the graph passes the cap — a 1,252-package build on the run below — and every mechanism above fires:
 
-**The row cap truncates a plain query.** Asking for every package name in one query returns exactly **1,024** rows against a graph holding **1,505** — no error, no flag, no `next_cursor` marking the result short. The keyset pager returns all 1,505. **481 packages, silently absent** from a query that looked like it succeeded.
+**The row cap truncates a plain query.** Asking for every package name in one query returns exactly **1,024** rows against a graph holding **1,252** — no error, no flag, no `next_cursor` marking the result short. The keyset pager returns all 1,252. **228 packages, silently absent** from a query that looked like it succeeded.
 
-**The path ceiling saturates on the densest targets, and the fallback catches it.** Taking the six most depended-upon packages by in-degree:
+**The path ceiling saturates on dense targets, and the fallback catches it.** Probing the 24 most depended-upon packages on a 1,252-package rebuild:
 
-| Target | `algo.SSpaths` | Exhaustive fallback | Outcome |
-|---|---|---|---|
-| `tslib` | **saturated** | 82 | ceiling detected → fell back |
-| `es-errors` | **saturated** | 135 | ceiling detected → fell back |
-| `call-bound` | **saturated** | 92 | ceiling detected → fell back |
-| `debug` | 93 (1.2s) | 93 (5.7s) | agree |
-| `semver` | 95 (1.4s) | 95 (6.2s) | agree |
-| `@parcel/plugin` | 43 (0.6s) | 43 (1.9s) | agree |
+| Target | in-degree | `algo.SSpaths` | Exhaustive fallback | Outcome |
+|---|---|---|---|---|
+| `es-errors` | 20 | **saturated** | 89 (7.7s) | ceiling detected → fell back |
+| `es-object-atoms` | 13 | **saturated** | 73 (5.5s) | ceiling detected → fell back |
+| `get-intrinsic` | 12 | **saturated** | 72 (5.1s) | ceiling detected → fell back |
+| `debug` | 47 | 80 (1.3s) | 80 (6.3s) | agree exactly |
+| `safe-buffer` | 27 | 72 (1.3s) | 72 (5.0s) | agree exactly |
+| `call-bound` | 17 | 62 (0.9s) | 62 (4.0s) | agree exactly |
 
-Three of the six densest packages in the graph saturate the fast path. The guard catches all three and the slower walk answers them completely. The other three agree exactly between the two engines — which is the part that makes the fallback trustworthy rather than merely different: where the fast path *is* complete, it and the exhaustive path return the identical set.
+Three saturate; the guard catches every one and the exhaustive walk answers them completely. The other 21 agree **exactly** between the two engines — that agreement is what makes the fallback trustworthy rather than merely different: where the fast path *is* complete, it and the exhaustive path return the identical set.
+
+**Which packages saturate depends on the graph, and in-degree barely predicts it.** `debug` has 47 direct dependents and answers comfortably; `get-intrinsic` has 12 and saturates. The ceiling counts *paths*, and the diamond-shaped `es-*`/`get-intrinsic` micro-package web multiplies distinct routes far faster than a wide-but-shallow tree does. An earlier version of this table came from a different 1,505-package build where `tslib` and `call-bound` saturated and these three were not all present — same mechanism, different packages. That is why the reproduction below probes 24 candidates rather than 6: ranking by dependent count and stopping at the top few reports "nothing saturates" on a graph where six things do. Do not read the package names as the finding; the mechanism is the finding.
 
 **End to end through the API**, `/api/blast-radius?name=es-errors` reports `engine: "variable-length MATCH"` and `fallbackReason: "path-ceiling"`, and the UI says the radius is complete rather than truncated — a saturated ceiling means the fast path *would have* under-reported this specific answer, which is worth saying out loud on a security tool.
 
 **And the honest cost.** `coreQueryMs` goes from 4–6ms on the demo graph to 0.6–1.4s here, and a saturating target costs ~2s on the fallback traversal plus several seconds more to assemble the drawing. Work is proportional to paths enumerated, not to answer size. The 9–16x speedup in the table above is a demo-graph number and does not survive to this scale; the correctness guarantee does.
 
-Reproduce with `node src/eval.js`-style ingestion of additional roots — any ~40 npm roots will do it, since the thresholds are properties of the engine, not of the packages chosen.
+Reproduce all of it yourself — the measurement ships:
+
+```bash
+node bench/scale.js --yes --target=1200
+```
+
+It ingests deep-tree npm roots until the graph passes the cap, then prints both tables above against whatever graph it built. **It rewrites the demo graph**, which is why it refuses to run without `--yes`; restore with `./setup.sh --fresh`. The thresholds are properties of the engine rather than of the packages chosen, so a different root list reproduces the same mechanisms with different names in the rows.
 
 **Proof the traversal is correct.** `src/eval.js` computes the blast radius independently by BFS over the raw edge list in memory, with no HydraDB involved, then asks HydraDB the same question and diffs the two sets: **1.00 precision and 1.00 recall** on every target. This is a correctness gate on the ingest → store → traverse round trip, not a vulnerability-detection accuracy score — the distinction matters and is spelled out in [the eval section](#correctness-eval).
 
