@@ -123,6 +123,12 @@ Reproduce with `node src/eval.js`-style ingestion of additional roots — any ~4
 
 ![Tracing the dependency chain that exposes serve-static](docs/traced-path.png)
 
+## Try it without installing anything
+
+There is a **[recorded snapshot of the running demo](https://sogoyalz.github.io/hydra-blast-radius/?pkg=body-parser&maintainer=dougwilson)** — the graph, click-to-trace, publish-rights reach, typosquat scan and version-level advisories, all explorable in the browser with no Docker and no database.
+
+Every number in it is the real response from a real HydraDB traversal over the 120-package demo graph, captured by `scripts/capture-snapshot.js` and committed. **It is not a live database, and the page says so in a banner at the top.** A project whose whole argument is "this tool never quietly reports the wrong thing" does not get to ship a demo that pretends to be something it isn't. For live queries against any package at any depth, clone and run — it takes about fifteen seconds.
+
 ## Quick start
 
 ```bash

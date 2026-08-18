@@ -405,6 +405,13 @@
   <span class="tag provenance">Hack Hydra &middot; Track 2A &middot; built on HydraDB</span>
 </header>
 
+<!-- Provenance disclosure lives here, in its own element, NOT in #status.
+     #status is transient — computeBlastRadius() clears it on every query — so a
+     banner appended there disappears the moment anyone runs anything, leaving
+     recorded data on screen with no sign it is recorded. That is strictly worse
+     than no banner, and it is what happened the first time this was wired up. -->
+<div id="mode-banner"></div>
+
 <main>
   <div id="graph-panel">
     <div id="controls">
@@ -557,7 +564,44 @@ function el(tag, attrs) {
 // headers arrive leaves a stalled body read unbounded, which is the same hang
 // with extra steps. Returns a plain object rather than the Response because
 // the body has already been consumed by then.
+// Set when the page is running from a recorded snapshot instead of a live
+// server (see initialise() at the bottom). Everything below keeps calling the
+// API exactly as it would against HydraDB; only this one function knows the
+// difference, so there is no second code path to keep in sync — and no way for
+// the snapshot to drift into showing something the real API would not.
+let snapshot = null;
+
+// Answers an API request from the recorded snapshot, in the same shape
+// fetchWithTimeout returns for a real one.
+function fromSnapshot(url) {
+  const reply = (status, body) => ({ ok: status === 200, status, json: () => body });
+  const path = url.split("?")[0];
+  const name = new URLSearchParams(url.split("?")[1] ?? "").get("name");
+
+  if (path === "/api/packages") return reply(200, { names: snapshot.packages });
+  if (path === "/api/typosquat") return reply(200, snapshot.typosquat);
+  if (path === "/api/blast-radius") {
+    const hit = snapshot.blastRadius[name];
+    return hit
+      ? reply(200, hit)
+      : reply(404, { error: `"${name}" is not in the ingested graph` });
+  }
+  if (path === "/api/versions") {
+    const hit = snapshot.versions[name];
+    if (hit) return reply(200, hit);
+    // Version history is ingested on demand, so a snapshot can only hold it
+    // for packages that were asked about before capture. Say which, rather
+    // than letting this look like a failure or an empty result.
+    const have = Object.keys(snapshot.versions).sort().join(", ");
+    return reply(404, {
+      error: `this recorded snapshot only includes version history for: ${have}. Clone and run to query any package.`,
+    });
+  }
+  return reply(404, { error: "unknown endpoint" });
+}
+
 async function fetchWithTimeout(url, timeoutMs = 25_000) {
+  if (snapshot && url.startsWith("/api/")) return fromSnapshot(url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -1653,7 +1697,7 @@ function servedOverHttp() {
   return location.protocol === "http:" || location.protocol === "https:";
 }
 
-if (!servedOverHttp()) {
+function showFileProtocolBanner() {
   const port = 8787;
   statusEl.className = "error";
   statusEl.textContent = "";
@@ -1673,7 +1717,70 @@ if (!servedOverHttp()) {
   statusEl.appendChild(box);
   document.getElementById("typosquat-results").innerHTML =
     `<div style="color:var(--muted);font-size:13px">Unavailable — open the served URL above.</div>`;
-} else {
+}
+
+// Stated at the top of the page, permanently, not as a dismissible toast. The
+// whole argument of this project is that it never quietly reports something
+// other than what it measured, and a recorded demo presented as a live
+// database would break that for the sake of a nicer link. Every number below
+// came out of a real HydraDB traversal; none of it is being computed now.
+function showSnapshotBanner() {
+  const box = document.createElement("div");
+  box.style.cssText =
+    "margin:0;padding:11px 22px;border-bottom:1px solid var(--border);" +
+    "border-left:3px solid var(--hop1);line-height:1.6;color:var(--text);font-size:13px";
+  const when = snapshot.capturedAt ? snapshot.capturedAt.slice(0, 10) : "an earlier run";
+  box.innerHTML =
+    `<strong style="color:var(--hop1)">Recorded snapshot — not a live database.</strong>` +
+    `<div style="margin-top:5px;color:var(--muted)">Every result here is the real response from a real ` +
+    `HydraDB traversal over the ${esc(snapshot.packages.length)}-package demo graph, captured on ` +
+    `${esc(when)}${snapshot.commit ? ` at commit <code>${esc(snapshot.commit)}</code>` : ""}. ` +
+    `Nothing is being queried now, and nothing here is synthesised. Traces, publish-rights reach and ` +
+    `advisory ranges are all live-captured and fully clickable.</div>` +
+    `<div style="margin-top:6px;color:var(--faint);font-size:12px">Fixed at ${esc(snapshot.depth)} hops. ` +
+    `Version history covers ${esc(Object.keys(snapshot.versions).length)} packages. ` +
+    `To query any package at any depth against a real database, clone the repo and run <code>./setup.sh</code>.</div>`;
+  document.getElementById("mode-banner").appendChild(box);
+  // The recorded responses are all at one depth, so offering the control would
+  // promise something the snapshot cannot answer.
+  depthInput.disabled = true;
+  depthInput.title = `This snapshot was captured at ${snapshot.depth} hops; clone and run to vary it.`;
+}
+
+async function initialise() {
+  if (!servedOverHttp()) {
+    showFileProtocolBanner();
+    return;
+  }
+
+  // Probe the real API first — a local clone must always get the live thing,
+  // and only fall back when there is demonstrably no server behind this page.
+  try {
+    const res = await fetch("/api/packages", { signal: AbortSignal.timeout(4000) });
+    if (res.ok) {
+      await res.json(); // confirm it is really our API and not someone's 200 HTML
+      loadPackageList();
+      loadTyposquats();
+      return;
+    }
+  } catch {
+    /* no live API here; try the recorded snapshot below */
+  }
+
+  try {
+    const res = await fetch("./snapshot.json", { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`snapshot.json -> ${res.status}`);
+    snapshot = await res.json();
+  } catch {
+    statusEl.className = "error";
+    statusEl.textContent =
+      "No API on this origin and no recorded snapshot alongside it — run ./setup.sh to serve the live demo.";
+    document.getElementById("typosquat-results").innerHTML =
+      `<div style="color:var(--muted);font-size:13px">Unavailable.</div>`;
+    return;
+  }
+
+  showSnapshotBanner();
   loadPackageList();
   loadTyposquats();
 }
@@ -1682,15 +1789,19 @@ if (!servedOverHttp()) {
 //   ?pkg=body-parser&maintainer=dougwilson   one credential's whole reach
 //   ?pkg=debug&trace=serve-static            the chain that exposes a package
 // Useful for demos and for citing a concrete result somewhere else.
-const params = new URLSearchParams(location.search);
-const initialPkg = params.get("pkg");
-// Skipped when unserved for the same reason the startup loads are: the query
-// would fail with the same unhelpful message and overwrite the explanation
-// that says how to fix it.
-if (initialPkg && servedOverHttp()) {
+function handleDeepLink() {
+  const params = new URLSearchParams(location.search);
+  const initialPkg = params.get("pkg");
+  // Skipped when unserved for the same reason the startup loads are: the query
+  // would fail with the same unhelpful message and overwrite the explanation
+  // that says how to fix it.
+  if (!initialPkg || !servedOverHttp()) return;
   pkgInput.value = initialPkg;
   const depthParam = params.get("depth");
-  if (depthParam) depthInput.value = depthParam;
+  // Honoured only when a depth is answerable — a snapshot holds one depth, and
+  // silently ignoring the parameter would be less confusing than appearing to
+  // apply it.
+  if (depthParam && !depthInput.disabled) depthInput.value = depthParam;
   computeBlastRadius().then(() => {
     if (!lastData) return; // the lookup failed; the error is already on screen
     const maintainer = params.get("maintainer");
@@ -1699,6 +1810,10 @@ if (initialPkg && servedOverHttp()) {
     else if (trace) showPath(trace);
   });
 }
+
+// Deep links must wait for the API probe, because which backend answers them
+// is only known once initialise() has settled.
+initialise().then(handleDeepLink);
 </script>
 </body>
 </html>

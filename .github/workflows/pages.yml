@@ -1,0 +1,62 @@
+name: pages
+
+# Publishes frontend/ to GitHub Pages, so the UI is explorable without Docker.
+#
+# What gets published is the recorded snapshot in frontend/snapshot.json, not a
+# live database — the page says so in a banner it cannot lose. Regenerate the
+# snapshot with `node scripts/capture-snapshot.js` against a running ./setup.sh
+# and commit it; this workflow only ships what is already in the repo, so it can
+# never publish numbers nobody captured.
+#
+# Needs Pages enabled once, in Settings -> Pages -> Source: GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A queued deploy should not race an in-flight one, but neither should it cancel
+# a push that is mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail rather than publish a page whose data is missing. Without the
+      # snapshot the deployed site silently falls back to "no API here", which
+      # looks like a broken project to whoever clicked the link.
+      - name: Assert the recorded snapshot is present and non-trivial
+        run: |
+          test -f frontend/snapshot.json || { echo "frontend/snapshot.json is missing — run scripts/capture-snapshot.js"; exit 1; }
+          node -e '
+            const s = JSON.parse(require("fs").readFileSync("frontend/snapshot.json", "utf8"));
+            const radii = Object.keys(s.blastRadius ?? {}).length;
+            if (!s.packages?.length || radii < s.packages.length) {
+              console.error(`snapshot covers ${radii} of ${s.packages?.length ?? 0} packages — recapture it`);
+              process.exit(1);
+            }
+            console.log(`snapshot: ${s.packages.length} packages, ${radii} blast radii, captured ${s.capturedAt}`);
+          '
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend
+      - id: deployment
+        uses: actions/deploy-pages@v4
