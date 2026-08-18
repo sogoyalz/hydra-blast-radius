@@ -237,16 +237,18 @@ node src/eval.js koa --depth=3 --max-nodes=200
 
 The track brief scores on precision, recall, query latency and cost against OSV / GitHub Advisory ground truth. Since the organizers' held-out harness isn't available to entrants, `src/eval.js` builds the strongest self-check available: it crawls a dependency tree, computes the blast radius **independently** by BFS over the raw edge list in memory (no HydraDB involved), then asks HydraDB's `REQUIRED_BY` traversal the same question and compares the two sets — reporting precision, recall, F1 and per-query latency, with each target cross-referenced against its real OSV advisory count.
 
-The two methods should agree exactly; they currently do, at **1.00 precision and 1.00 recall** on every target, with traversals answering in 8–44ms:
+The two methods should agree exactly; they currently do, at **1.00 precision and 1.00 recall** on every target, with traversals answering in 25–30ms. Run against an empty graph (`./setup.sh --fresh --no-ingest`) on 2026-08-17:
 
 ```
-target               truth   hydra   P      R      F1     ms     OSV advisories
-fresh                1       1       1.00   1.00   1.00   44     1
-negotiator           2       2       1.00   1.00   1.00   9      1
-mime-types           3       3       1.00   1.00   1.00   9      0
-statuses             3       3       1.00   1.00   1.00   9      0
-http-errors          2       2       1.00   1.00   1.00   8      0
+target               truth   hydra   P      R      F1     ms     prior  OSV advisories
+fresh                1       1       1.00   1.00   1.00   29     0      1
+negotiator           2       2       1.00   1.00   1.00   27     0      1
+mime-types           3       3       1.00   1.00   1.00   30     0      0
+statuses             3       3       1.00   1.00   1.00   29     0      0
+http-errors          2       2       1.00   1.00   1.00   25     0      0
 ```
+
+`prior` is 0 on every row, which is what makes this a clean baseline rather than a flattering one: it counts packages HydraDB returned that came from some *earlier* ingest, and any non-zero value there would mean the graph held more than this crawl and the precision column was measuring the wrong thing.
 
 Targets are chosen to make the table say something. Ranking purely by in-degree picks the biggest blast radii, but the most-depended-upon packages in a typical npm tree are stable low-level utilities that have never had an advisory — which made the OSV column print all zeros on every run and look like a dead integration. So a wider slice is ranked by in-degree, packages carrying real advisories are preferred, and the rest is backfilled by in-degree.
 
