@@ -27,7 +27,18 @@ function parseArgs(argv) {
   let depth = 6;
   for (const arg of rest) {
     const [key, value] = arg.replace(/^--/, "").split("=");
-    if (key === "depth") depth = Number(value);
+    // Validated like every other CLI's numeric flag. Unvalidated, the value is
+    // interpolated straight into the traversal's `*1..N` bound, so a typo left
+    // the user staring at a raw HydraDB 400 with an OpenCypher parse error in
+    // it — the engine's internals surfacing as the answer to a mistyped flag.
+    if (key === "depth") {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1) {
+        console.error(`--depth must be a positive integer, got "${value}"`);
+        process.exit(1);
+      }
+      depth = n;
+    }
   }
   return { name, depth };
 }

@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 
 import { packageId, maintainerId, versionId, cypherString, fetchWithTimeout } from "../src/hydra.js";
-import { levenshtein } from "../src/typosquat.js";
+import { levenshtein, findTyposquats } from "../src/typosquat.js";
 import { groundTruthBlastRadius, precisionRecall } from "../src/eval.js";
 import {
   parseSemver,
@@ -204,6 +204,25 @@ describe("levenshtein", () => {
     // to do with impersonation, they are just short.
     assert.equal(levenshtein("ms", "qs"), 1);
     assert.equal(levenshtein("acorn", "cors"), 2);
+  });
+});
+
+describe("typosquat threshold handling", () => {
+  // The CLI validates --max-distance now, but the reason is worth pinning at
+  // the function boundary too: with NaN every `distance <= maxDistance` test is
+  // false, so the scan discards every candidate and reports a clean graph.
+  // Measured before the fix — `node src/typosquat.js --max-distance=abc`
+  // printed "No typosquat candidates found" on the demo graph, silently
+  // suppressing the real `expres`/`express` squat it exists to surface. A
+  // security scanner must not be turnable into a clean bill of health by a typo.
+  // Deliberately only the NaN case. It short-circuits before the
+  // download-confirmation step, so it stays offline like the rest of this
+  // suite; the matching positive case would fetch real download counts for
+  // every suspect and put a live npm dependency into CI. That `expres` is
+  // distance 1 from `express` is already pinned in the levenshtein block above.
+  test("a NaN threshold discards every candidate — why the CLI rejects it", async () => {
+    const found = await findTyposquats(["expres"], NaN);
+    assert.equal(found.length, 0, "NaN silently matches nothing");
   });
 });
 

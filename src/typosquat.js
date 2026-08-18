@@ -162,7 +162,22 @@ function parseArgs(argv) {
   let maxDistance = 2;
   for (const arg of argv) {
     const [key, value] = arg.replace(/^--/, "").split("=");
-    if (key === "max-distance") maxDistance = Number(value);
+    // Validated for the same reason ingest.js validates its caps, and the
+    // consequence here is worse than an error would be. Number("abc") is NaN,
+    // and every comparison against NaN is false — so `distance <= maxDistance`
+    // never matches, every candidate is discarded, and the scan prints "No
+    // typosquat candidates found" over a graph that contains a real one.
+    // Measured: `--max-distance=abc` silently suppressed the genuine
+    // `expres`/`express` detection the demo graph exists to surface. A typo
+    // must not be able to turn a security scanner into a clean bill of health.
+    if (key === "max-distance") {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1) {
+        console.error(`--max-distance must be a positive integer, got "${value}"`);
+        process.exit(1);
+      }
+      maxDistance = n;
+    }
   }
   return { maxDistance };
 }
