@@ -644,7 +644,23 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
-    console.error("Version analysis failed:", err);
+    // A tagged upstream failure is an expected operating condition, not a
+    // crash: npm or OSV is slow, rate-limiting, or down, and the answer is to
+    // try again — not to read a Node stack trace. ingest.js already draws this
+    // line for the same class of failure (its "could not fetch the root"
+    // path), and the server draws it too via the same `upstream` tag; this was
+    // the one caller still dumping a stack at the user for it. An untagged
+    // error really is unexpected, so it keeps the stack, which is where a
+    // stack is actually worth having.
+    if (err.upstream) {
+      console.error(
+        `\nERROR: ${err.message}\n` +
+          `       Nothing was analysed, so this is not a statement about the package.\n` +
+          `       ${err.upstream === "OSV" ? "Advisory data could not be checked" : "Version history could not be fetched"} — re-run when it responds.`
+      );
+    } else {
+      console.error("Version analysis failed:", err);
+    }
     process.exit(1);
   });
 }
