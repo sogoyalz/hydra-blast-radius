@@ -1579,7 +1579,23 @@ async function computeBlastRadius() {
   } catch (err) {
     statusEl.textContent = err.message;
     statusEl.className = "error";
-    summaryEl.textContent = "No result.";
+    // A failed query leaves the previous result drawn — render() never ran, so
+    // the canvas, the traced path and lastData all still describe the package
+    // from before. That is worth keeping (losing a good result because the
+    // next lookup was a typo is worse), but it cannot be left unlabelled: the
+    // input now reads one package while the graph draws another, and a bare
+    // "No result." does not reconcile them. On a tool whose whole output is
+    // "this is what is exposed", a picture that appears to answer for the name
+    // in the box while describing a different package is the same class of
+    // wrongness as claiming an unrelated package is the target.
+    if (lastData) {
+      summaryEl.innerHTML = `<span style="color:var(--error)">No result for
+        <strong>${esc(name)}</strong>.</span>
+        <div style="margin-top:8px;color:var(--muted);font-size:12.5px">The graph below still
+        shows the previous result, for <strong style="color:var(--text)">${esc(lastData.target)}</strong>.</div>`;
+    } else {
+      summaryEl.textContent = "No result.";
+    }
   } finally {
     goBtn.disabled = false;
   }
