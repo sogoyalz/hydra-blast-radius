@@ -8,7 +8,8 @@ name: pages
 # and commit it; this workflow only ships what is already in the repo, so it can
 # never publish numbers nobody captured.
 #
-# Needs Pages enabled once, in Settings -> Pages -> Source: GitHub Actions.
+# Enables Pages itself on first run (see enablement below), so a fresh clone of
+# this repo needs no manual settings step to reproduce the published demo.
 
 on:
   push:
@@ -54,7 +55,12 @@ jobs:
             console.log(`snapshot: ${s.packages.length} packages, ${radii} blast radii, captured ${s.capturedAt}`);
           '
 
+      # enablement: true turns Pages on for the repo the first time this runs,
+      # so publishing needs no click-through in Settings. The repo is already
+      # public, so this exposes nothing that was not already readable.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: frontend
