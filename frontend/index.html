@@ -447,7 +447,13 @@
            the setup script recommends, one click each. -->
       <div id="examples" style="margin-top:12px">
         <div style="font-size:12px;color:var(--muted);margin-bottom:7px">Or start with one of these:</div>
-        <button class="example" data-pkg="body-parser" title="1 package exposed by dependencies, 36 once shared publish rights are counted">body-parser <span>36 vs 1</span></button>
+        <!-- The only example label that quotes numbers, so it is filled from the
+             graph at runtime rather than written in here. Hardcoded, it would
+             keep asserting "36 vs 1" against whatever graph is actually loaded
+             — including a re-ingest where a maintainer changed, or the scale
+             benchmark's 1,252-package build. It ships with a neutral label so a
+             failed fill shows nothing rather than something wrong. -->
+        <button class="example" data-pkg="body-parser" data-example-gap="body-parser" title="The gap between what a dependency scanner reports and what shared publish rights actually reach">body-parser <span>both channels</span></button>
         <button class="example" data-pkg="qs" title="A package carrying real GHSA advisories, reached through express → body-parser → qs">qs <span>real CVEs</span></button>
         <button class="example" data-pkg="debug" title="A deeper multi-hop dependency picture">debug <span>multi-hop</span></button>
       </div>
@@ -640,6 +646,37 @@ async function loadPackageList() {
     datalistHint.textContent = "";
     statusEl.textContent = `Couldn't load the package list: ${err.message}`;
     statusEl.className = "error";
+  }
+}
+
+// Fills the headline example's label from the graph that is actually loaded.
+//
+// It goes through the same fetchWithTimeout every other panel uses, so it costs
+// nothing extra on the published snapshot (the answer is already in hand) and
+// one ordinary query against a live server — the same query clicking the button
+// would run a moment later anyway.
+//
+// Failure is silent on purpose: the button keeps its neutral label and stays
+// clickable. The whole reason this is not written into the markup is to avoid
+// showing a number that does not match the graph, so falling back to a stale
+// guess would defeat it.
+async function fillExampleGap() {
+  const btn = document.querySelector("button.example[data-example-gap]");
+  if (!btn) return;
+  const name = btn.dataset.exampleGap;
+  try {
+    const res = await fetchWithTimeout(`/api/blast-radius?name=${encodeURIComponent(name)}&depth=6`, 20_000);
+    if (!res.ok) return;
+    const u = (await res.json()).unifiedExposure;
+    // What a dependency-only scanner would report: everything reached through
+    // dependency edges, whether or not credentials also reach it.
+    const viaDeps = u.viaDependencyOnly + u.viaBoth;
+    btn.querySelector("span").textContent = `${u.total} vs ${viaDeps}`;
+    btn.title =
+      `${viaDeps} package${viaDeps === 1 ? "" : "s"} exposed through dependencies, ` +
+      `${u.total} once shared publish rights are counted`;
+  } catch {
+    /* keep the neutral label rather than inventing a number */
   }
 }
 
@@ -1761,6 +1798,7 @@ async function initialise() {
       await res.json(); // confirm it is really our API and not someone's 200 HTML
       loadPackageList();
       loadTyposquats();
+      fillExampleGap();
       return;
     }
   } catch {
@@ -1783,6 +1821,7 @@ async function initialise() {
   showSnapshotBanner();
   loadPackageList();
   loadTyposquats();
+  fillExampleGap();
 }
 
 // Deep links, so a specific finding is a URL rather than a list of steps:
