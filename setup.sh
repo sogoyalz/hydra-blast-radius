@@ -135,10 +135,19 @@ for i in $(seq 1 60); do
 done
 
 # ---------------------------------------------------------------- data
+# Paged, like every other package count in this project: an unpaged query
+# stops at the engine's silent 1024-row cap. The >20 threshold below survives
+# that either way, but the number is also printed at you, and reporting "1024
+# packages" for a 1,505-package graph is the same quiet understatement the
+# tool exists to eliminate.
 ALREADY=$(node -e '
-import("./src/hydra.js").then(async ({ runQuery }) => {
+import("./src/hydra.js").then(async ({ runQueryPagedKeyset }) => {
   try {
-    const rows = await runQuery("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+    const rows = await runQueryPagedKeyset(
+      "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
+      "p.name",
+      "name"
+    );
     console.log(rows.length);
   } catch { console.log(0); }
 }).catch(() => console.log(0));
@@ -176,8 +185,12 @@ else
   node src/ingest.js expres --depth=1 --max-nodes=20
 
   LOADED=$(node -e '
-  import("./src/hydra.js").then(async ({ runQuery }) => {
-    const rows = await runQuery("MATCH (p:Package) RETURN DISTINCT p.name AS name");
+  import("./src/hydra.js").then(async ({ runQueryPagedKeyset }) => {
+    const rows = await runQueryPagedKeyset(
+      "MATCH (p:Package) {{SEEK}} RETURN DISTINCT p.name AS name ORDER BY name",
+      "p.name",
+      "name"
+    );
     console.log(rows.length);
   }).catch(() => { console.log(0); });
   ' 2>/dev/null || echo 0)

@@ -284,7 +284,21 @@ const server = createServer(async (req, res) => {
   try {
     // Inside the try: a malformed Host header makes `new URL` throw, and an
     // uncaught throw in an async request handler takes the whole process down.
-    const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
+    //
+    // Caught here rather than left to the generic handler below, for the same
+    // reason serveStatic() catches its own decodeURIComponent failure: a
+    // request the client malformed is not a server fault. Falling through
+    // answered 500 "internal server error" and logged a full stack trace for
+    // a header the caller got wrong — misleading to whoever is reading the
+    // logs, and free noise for anyone sending junk at it.
+    let url;
+    try {
+      url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`);
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "malformed request URL or Host header" }));
+      return;
+    }
 
     // Everything here reads; nothing this server exposes creates, changes or
     // deletes anything. The method was simply never inspected, so DELETE and
