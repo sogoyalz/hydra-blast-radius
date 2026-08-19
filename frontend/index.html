@@ -1821,10 +1821,23 @@ async function initialise() {
     return;
   }
 
+  // AbortController rather than AbortSignal.timeout(), which needs Safari 16 /
+  // Chrome 103. On anything older that call throws, and the throw lands in the
+  // catch below that reports "no recorded snapshot alongside it" — so the
+  // published demo would tell a visitor the snapshot was missing while serving
+  // it perfectly well, on a browser only a couple of years out of date. The
+  // page has no build step and no polyfills, so it has to stick to what ships
+  // everywhere; this is the same pattern fetchWithTimeout above already uses.
+  const withDeadline = (ms) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), ms);
+    return controller.signal;
+  };
+
   // Probe the real API first — a local clone must always get the live thing,
   // and only fall back when there is demonstrably no server behind this page.
   try {
-    const res = await fetch("/api/packages", { signal: AbortSignal.timeout(4000) });
+    const res = await fetch("/api/packages", { signal: withDeadline(4000) });
     if (res.ok) {
       await res.json(); // confirm it is really our API and not someone's 200 HTML
       loadPackageList();
@@ -1837,7 +1850,7 @@ async function initialise() {
   }
 
   try {
-    const res = await fetch("./snapshot.json", { signal: AbortSignal.timeout(15000) });
+    const res = await fetch("./snapshot.json", { signal: withDeadline(15000) });
     if (!res.ok) throw new Error(`snapshot.json -> ${res.status}`);
     snapshot = await res.json();
   } catch {
