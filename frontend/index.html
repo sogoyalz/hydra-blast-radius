@@ -157,6 +157,13 @@
     flex: 1;
     overflow: hidden;
     position: relative;
+    /* A floor, because flex will otherwise happily give this zero.
+       #graph-panel is a fixed height and the controls row wraps as the viewport
+       narrows — on a 400x228 window the controls grew to 119px against a 123px
+       panel, leaving the drawing area 0px tall. render() measures this box, so
+       the graph silently did not appear at all. The floor keeps the canvas
+       real; the panel below is allowed to grow to accommodate it. */
+    min-height: 200px;
   }
   svg { width: 100%; height: 100%; display: block; }
   .node circle { stroke: var(--bg); stroke-width: 2px; cursor: pointer; }
@@ -366,8 +373,14 @@
       border-bottom: 1px solid var(--border);
       /* A little more of the screen than before: the rings are radius-floored
          on a phone, so the extra height goes straight into separating nodes
-         rather than into empty margin. */
-      height: 54vh;
+         rather than into empty margin.
+         min-height, not height alone: 54vh of a short window is less than the
+         wrapped controls need, and the drawing area was being squeezed out of
+         existence rather than the panel growing. Letting it grow costs a little
+         scrolling on a very short viewport and keeps the graph visible, which
+         is the whole point of the panel. */
+      height: auto;
+      min-height: 54vh;
     }
     #sidebar {
       overflow-y: visible;
@@ -831,8 +844,26 @@ function render(data, attempt = 0) {
   // the SVG has been laid out collapses every node into the top-left corner.
   // Wait a frame instead of drawing a broken graph — bounded, so a genuinely
   // hidden panel doesn't spin forever.
-  if ((rect.width < 50 || rect.height < 50) && attempt < 10) {
-    requestAnimationFrame(() => render(data, attempt + 1));
+  if (rect.width < 50 || rect.height < 50) {
+    if (attempt < 10) {
+      requestAnimationFrame(() => render(data, attempt + 1));
+      return;
+    }
+    // Out of retries and the box is still unusable. This used to return
+    // silently, leaving an empty panel and no clue — the sidebar would report a
+    // blast radius of 36 beside a blank canvas, which reads as a broken tool
+    // rather than a window too small to draw in. Say what happened.
+    ringsG.innerHTML = "";
+    edgesG.innerHTML = "";
+    nodesG.innerHTML = "";
+    const note = el("text", {
+      x: 12,
+      y: 22,
+      fill: "var(--muted)",
+      "font-size": "12",
+    });
+    note.textContent = "Drawing area is too small to render the graph — try a taller window.";
+    nodesG.appendChild(note);
     return;
   }
   const cx = rect.width / 2;
