@@ -6,6 +6,8 @@ Hack Hydra 2026 submission — Track 2, Option A ("Repos, Dependencies + Code as
 
 **The question:** if an npm package is compromised right now, what's exposed? This project builds the npm dependency graph in [HydraDB](https://github.com/hydra-db/hydradb) and answers that with a graph traversal — not a guess, not a vector search.
 
+**[▶ Try it in the browser](https://sogoyalz.github.io/hydra-blast-radius/?pkg=body-parser&maintainer=dougwilson)** — no Docker, no database. That link opens the finding this project exists for: `body-parser` looks like **1** exposed package through a dependency scanner and is actually **36**, because 35 of them share publish credentials rather than a dependency edge. Click the purple square to light up everything one stolen token reaches. (It is a recorded snapshot of real traversals, and says so; `./setup.sh` runs the live thing in about 16 seconds.)
+
 ## Why this is a graph problem, and what HydraDB does here
 
 A compromise spreads two ways, and they are different relationships in the graph:
