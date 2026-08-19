@@ -153,18 +153,22 @@ Once it's up, try **`body-parser`**: one package exposed through dependencies, ~
 
 ## Status
 
-Working end-to-end, including the demo UI. Of the six questions the track brief asks a submission to answer when a package is compromised, this answers five:
+Working end-to-end, including the demo UI. The track brief lists six questions a submission should answer when a package is compromised. Three are answered fully, two in part, and one not at all — scored strictly against the brief's own wording rather than a rewording of it:
 
 | Brief's question | Status |
 |---|---|
-| What is the complete blast radius? | ✅ `src/blastRadius.js` |
-| Which services are transitively exposed? | ✅ `src/blastRadius.js`, reported with hop distance |
-| Which packages share maintainers with it? | ✅ `src/sharedMaintainers.js` |
-| Are there likely typosquats nearby? | ✅ `src/typosquat.js` |
+| What is the complete blast radius? | ✅ `src/blastRadius.js` — the union of both channels |
 | Which version introduced the vulnerability? | ✅ `src/versions.js`, against OSV's affected ranges |
-| Which apps resolved the bad version while live? | ❌ needs lockfile ingestion |
+| Are there likely typosquat packages nearby? | ✅ `src/typosquat.js`, two-signal |
+| Which internal **services** are transitively exposed? | ⚠️ answered at *package* granularity, with hop distance — no service inventory is ingested, so "your services" is as far as the graph knows "packages you depend on" |
+| Which packages share maintainers **or infrastructure**? | ⚠️ maintainers yes (`src/sharedMaintainers.js`), infrastructure no — CI providers, registries and org ownership are not modelled |
+| Which apps resolved the bad version **while it was live**? | ❌ not attempted |
 
-The one remaining gap needs something the others did not: a concept of an *application* at all. This graph models packages and the people who can publish them; "which apps resolved the bad version while it was live" needs each app's resolved lockfile plus the window each bad version was installable in — a new vertex type and an ingestion source, not another query over what is already here. It is left undone and said so rather than approximated.
+**On the two partials, because the distinction is real.** Both are the same traversal this project already runs, pointed at data it does not have. Service-level exposure needs a service-to-package inventory; shared infrastructure needs CI/registry/org metadata as its own vertex type. Ingest either and the existing queries answer them unchanged — which is the argument for the graph model, not an excuse. But neither is ingested here, so neither is claimed.
+
+**On the one not attempted.** It needs a concept of an *application* at all. This graph models packages and the people who can publish them; "which apps resolved the bad version while it was live" needs each app's resolved lockfile plus the window each bad version was installable in — a new vertex type and an ingestion source, not another query over what is already here. It is left undone and said so rather than approximated.
+
+**And one thing the six questions do not ask for.** "Share maintainers" appears in the brief as a single query. This project treats shared publish rights as a co-equal *attack channel* and reports the union with the dependency tree, because that is the mechanism the incident in the brief's own opening actually used. That decision is the reason `body-parser` reads 36 instead of 1.
 
 Version-level modelling arrived late and deliberately second. The first thing built after the dependency graph was the other *attack channel* (publish rights), because the incident the brief opens with spread through stolen credentials, and no amount of version resolution would have caught it. Versions are a second *dimension* on a channel already modelled — worth having, but worth less than the channel nobody else was modelling at all.
 
@@ -257,7 +261,9 @@ Version strings that are not valid semver return `null` from the comparator inst
 node src/eval.js koa --depth=3 --max-nodes=200
 ```
 
-The track brief scores on precision, recall, query latency and cost against OSV / GitHub Advisory ground truth. Since the organizers' held-out harness isn't available to entrants, `src/eval.js` builds the strongest self-check available: it crawls a dependency tree, computes the blast radius **independently** by BFS over the raw edge list in memory (no HydraDB involved), then asks HydraDB's `REQUIRED_BY` traversal the same question and compares the two sets — reporting precision, recall, F1 and per-query latency, with each target cross-referenced against its real OSV advisory count.
+**What the brief's eval actually is, and what this is not.** The brief describes scoring against OSV / GitHub Advisory ground truth with *recent advisories held out and teams given an older ecosystem graph* — which is a **prediction task**: given the graph as it stood before an advisory landed, predict what that advisory would hit. **This project did not attempt that task.** It measures two different things instead: that the traversal returns exactly what is reachable (`src/eval.js`), and that the edges it traverses match an independent resolver's view of npm (`src/evalExternal.js`). Both report precision, recall and latency, and the cost axis is addressed [below](#on-cost) — so all four scored dimensions are covered, but on correctness and data fidelity rather than on held-out detection accuracy. Building the real thing needs a time-sliced graph the ingest does not currently produce; the `publishedAt` dates now on every `:Version` vertex are the piece that would make it possible. Said plainly here because the distinction is easy to blur and the numbers below are not the brief's number.
+
+With that stated, `src/eval.js` builds the strongest self-check available: it crawls a dependency tree, computes the blast radius **independently** by BFS over the raw edge list in memory (no HydraDB involved), then asks HydraDB's `REQUIRED_BY` traversal the same question and compares the two sets — reporting precision, recall, F1 and per-query latency, with each target cross-referenced against its real OSV advisory count.
 
 The two methods should agree exactly; they currently do, at **1.00 precision and 1.00 recall** on every target, with traversals answering in 25–30ms. Run against an empty graph (`./setup.sh --fresh --no-ingest`) on 2026-08-17:
 
