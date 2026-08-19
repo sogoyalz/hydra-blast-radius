@@ -1498,6 +1498,21 @@ async function loadVersions(packageName) {
   // found". Those two look identical to a reader if you let them, and one of
   // them wrongly says the package is clean — the same under-reporting this
   // project refuses everywhere else.
+  // The database refused every write, so nothing was stored and nothing below
+  // would be computed over a real ingest. Same rule as an OSV outage: an empty
+  // result caused by a broken backend must not be rendered as a finding.
+  if (data.writesAborted) {
+    box.innerHTML = `<div style="padding:9px 11px;border:1px solid var(--border);
+      border-left:3px solid var(--error);border-radius:5px">
+      <strong style="color:var(--error)">Version history could not be stored.</strong>
+      <div style="margin-top:5px;color:var(--muted);font-size:12px">
+        The database refused every write, so <strong>nothing was checked</strong> — this is
+        not a statement about <strong>${esc(packageName)}</strong>. The blast radius above is
+        unaffected; it only reads. Restore writes with <code>./setup.sh --fresh</code>.
+      </div></div>`;
+    return;
+  }
+
   if (data.osvUnavailable) {
     box.innerHTML = `<div style="padding:9px 11px;border:1px solid var(--border);
       border-left:3px solid var(--error);border-radius:5px">
@@ -1837,7 +1852,13 @@ async function initialise() {
   // Probe the real API first — a local clone must always get the live thing,
   // and only fall back when there is demonstrably no server behind this page.
   try {
-    const res = await fetch("/api/packages", { signal: withDeadline(4000) });
+    // Relative, not root-relative. On a project Pages site served under
+    // /hydra-blast-radius/, a leading slash escapes to the domain root — the
+    // probe was hitting sogoyalz.github.io/api/packages, outside the
+    // deployment entirely. It 404s either way so the fallback still fired,
+    // but it was reaching for a path this app does not own, and would have
+    // used whatever answered there. Relative keeps it inside the deployment.
+    const res = await fetch("./api/packages", { signal: withDeadline(4000) });
     if (res.ok) {
       await res.json(); // confirm it is really our API and not someone's 200 HTML
       loadPackageList();

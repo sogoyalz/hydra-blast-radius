@@ -379,14 +379,28 @@ export async function versionsForPackage(name) {
 // property on an existing vertex from a MERGE, and MERGE cannot be followed
 // by another clause — so the only field that reliably writes is one carried
 // inline on a vertex already being created. It costs one integer per row.
+// Stop after this many failures with nothing succeeding in between. A wedged
+// backend fails every write identically, and grinding through the remaining
+// hundreds proves nothing while the caller waits: a 500-version package took
+// ~7 seconds to report a failure it could have reported in well under one.
+// Measured against a real instance of this — HydraDB's local object store
+// stops accepting writes once SlateDB needs a conditional put its filesystem
+// backend does not implement, and every subsequent MERGE returns a 500 while
+// reads keep working perfectly.
+const WRITE_FAILURE_ABORT = 8;
+
 export async function writeVersions(name, versions, historyTotal) {
   const pkgId = packageId(name);
   const pkgName = cypherString(name);
   const total = Number.isFinite(historyTotal) ? historyTotal : versions.length;
   let written = 0;
   let failed = 0;
+  let consecutiveFailures = 0;
+  let aborted = false;
+  let lastError = null;
 
   await mapWithConcurrency(versions, WRITE_CONCURRENCY, async (v) => {
+    if (aborted) return;
     try {
       await runQuery(
         `MERGE (p:Package {id: ${pkgId}, name: ${pkgName}})-[:HAS_VERSION]->` +
@@ -395,13 +409,29 @@ export async function writeVersions(name, versions, historyTotal) {
           `historyTotal: ${total}})`
       );
       written++;
+      consecutiveFailures = 0; // a success means the backend is alive; keep going
     } catch (err) {
       failed++;
+      lastError = err;
+      consecutiveFailures++;
+      if (consecutiveFailures >= WRITE_FAILURE_ABORT && written === 0) {
+        aborted = true;
+        return;
+      }
       process.stderr.write(`\nfailed to write ${name}@${v.version}: ${err.message}\n`);
     }
   });
 
-  return { written, failed };
+  if (aborted) {
+    process.stderr.write(
+      `\nAborted after ${failed} consecutive write failures with none succeeding — the\n` +
+        `database is not accepting writes. Last error: ${lastError?.message?.slice(0, 120)}\n` +
+        `If this is the local object store, ./setup.sh --fresh restores it; a container\n` +
+        `restart does not, because the state is in the store rather than the process.\n`
+    );
+  }
+
+  return { written, failed, aborted };
 }
 
 // Whether a stored history is partial, derived from what was written rather
@@ -445,8 +475,18 @@ export async function ingestVersions(name, { maxVersions = DEFAULT_MAX_VERSIONS 
   const truncated = all.length > maxVersions;
   const kept = truncated ? all.slice(0, maxVersions) : all;
 
-  const { failed } = await writeVersions(name, kept, all.length);
-  return { versions: kept, ingested: true, truncated, writeFailures: failed, totalKnown: all.length };
+  const { written, failed, aborted } = await writeVersions(name, kept, all.length);
+  return {
+    // Only what actually landed. Returning `kept` regardless would hand the
+    // caller versions that are not in the graph, and the advisory analysis
+    // would then report ranges over releases nobody could look up again.
+    versions: aborted ? kept.slice(0, written) : kept,
+    ingested: true,
+    truncated,
+    writeFailures: failed,
+    writesAborted: aborted,
+    totalKnown: all.length,
+  };
 }
 
 // The whole question, answered: which published versions of this package sit
@@ -538,6 +578,7 @@ export async function analyzeVersions(name, { maxVersions = DEFAULT_MAX_VERSIONS
     latestVersion: sorted[sorted.length - 1]?.version ?? null,
     nonSemverCount,
     truncated: ingest.truncated,
+    writesAborted: ingest.writesAborted ?? false,
     notPublished: ingest.notPublished ?? false,
     ingested: ingest.ingested,
     writeFailures: ingest.writeFailures,
@@ -599,6 +640,17 @@ async function main() {
   }
   if (r.nonSemverCount > 0) {
     console.log(`NOTE: ${r.nonSemverCount} version string(s) are not valid semver and were excluded from range analysis.`);
+  }
+  if (r.writesAborted) {
+    console.error(
+      `\nERROR: the database refused every write, so no version history was stored and\n` +
+        `       nothing below was computed over a real ingest. This is not a statement\n` +
+        `       about "${name}".\n` +
+        `       If this is the local object store, ./setup.sh --fresh restores it — a\n` +
+        `       container restart does not, because the state is in the store.`
+    );
+    process.exitCode = 1;
+    return;
   }
   if (r.writeFailures > 0) {
     console.log(`NOTE: ${r.writeFailures} version write(s) failed; the history is incomplete.`);
