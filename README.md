@@ -68,6 +68,29 @@ Calling it at all took some finding, and both discoveries are the kind that cost
 - Vertex identity is the integer `id` **alone — labels do not scope it**, and they accumulate. Hashing maintainer names in the same space as package names would have silently fused maintainer `ljharb` with a package named `ljharb`. Ids are namespaced per type. ([why](#why-vertex-ids-are-hashed-and-namespaced))
 - A relationship pattern may name **exactly one type** — `[:REQUIRED_BY|MAINTAINS*1..3]` is rejected outright. So the two channels genuinely cannot be walked in one traversal; they are queried separately and unioned in `src/server.js`. That is a design consequence, not a shortcut.
 
+### One more limit, found the hard way: the local object store stops accepting writes
+
+Running against `CLOUD_PROVIDER=local`, the store eventually reaches a state where **every write fails and every read keeps working**. The container says why, at WARN, while the HTTP API returns a bare `500 internal query execution error`:
+
+```
+object store error: Operation `put_opts` with mode `PutMode::Update`
+not yet implemented by LocalFileSystem(file:///data/store)
+```
+
+SlateDB needs a conditional put to roll its manifest forward; the local-filesystem backend has not implemented that operation, so once compaction needs it, writes are over. **A container restart does not clear it** — the state is in the store, not the process. `./setup.sh --fresh` does, in about 20 seconds.
+
+It takes real volume to reach: this appeared only after a day of repeated `--fresh` cycles, a 1,252-package scale run, and several hundred version ingests. A normal `./setup.sh` plus browsing does not come close. It is recorded here because it is the failure mode most likely to confuse someone who does hit it — reads working perfectly while writes silently 500 looks like a bug in this project rather than a limit in the engine's local backend, and `src/ingest.js` already exits non-zero on write failures precisely so a half-written graph cannot pass as a complete one.
+
+**Practical consequence for the demo.** Version history is ingested on demand, which is the only write path a viewer can trigger. Warming it once turns a 7-second first click on `webpack` (500 versions to write) into 45ms, and means the demo never touches the write path at all:
+
+```bash
+for p in qs express body-parser debug send cookie serve-static webpack; do
+  curl -s "http://127.0.0.1:8787/api/versions?name=$p" -o /dev/null
+done
+```
+
+The published snapshot has all of this baked in already, so it is unaffected either way.
+
 ### The path ceiling, and why the fast path is not always the right one
 
 `algo.SSpaths` **silently caps at 1024 paths**, whatever you ask for. Requesting 100, 500 or 1000 returns exactly that many; requesting 2000, 5000 or 20000 all return exactly 1024. It is not documented and there is no flag, warning, or truncation marker in the response — the reply to a saturated query is shaped exactly like the reply to a complete one.
