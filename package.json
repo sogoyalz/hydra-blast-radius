@@ -17,6 +17,7 @@
     "typosquat": "node src/typosquat.js",
     "versions": "node src/versions.js",
     "bench": "node bench/speedup.js",
+    "preflight": "node scripts/preflight.js",
     "dev": "node src/server.js"
   }
 }

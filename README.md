@@ -172,6 +172,16 @@ That's the whole setup. It starts HydraDB, waits for it to accept queries, inges
 
 > **Clone somewhere under your home directory.** HydraDB writes its store to a bind-mounted `hydradb-data/` as your own user, so the repo has to sit on a path your Docker VM shares writably. Some `/tmp` locations are mounted read-only or as root (this bites under Colima), and Docker Desktop only shares the directories in its File Sharing list. If you hit it, setup stops in about two seconds and says so explicitly rather than leaving you guessing.
 
+**Check it is actually working before you rely on it:**
+
+```bash
+npm run preflight
+```
+
+Verifies the database reads *and* writes, that the graph holds what this README claims, and that version history is warm — warming anything cold rather than only reporting it. Prints `READY` or names each problem with the command that fixes it, and exits non-zero so it can gate a script.
+
+That last check earns its place. A stack that was healthy one evening was dead the next morning: the container still reported `Up`, the HTTP port still accepted connections, and every query timed out because the VM's virtiofs mount had degraded and the database could no longer read its own store. **Reads and writes fail independently and neither is visible from the outside** — version history is ingested on demand, so a broken write path stays hidden until someone clicks a package that has not been ingested yet. `colima restart` (or restarting Docker Desktop) followed by `./setup.sh --fresh` clears it in about 15 seconds.
+
 Once it's up, try **`body-parser`**: one package exposed through dependencies, ~36 through shared publish rights. That gap is the point of the project.
 
 ## Status
